@@ -95,6 +95,11 @@ impl PluginManager {
     ) -> anyhow::Result<()> {
         let dir = dir.as_ref();
 
+        // Prevent path traversal attacks by rejecting paths containing '..'.
+        if dir.components().any(|c| c == std::path::Component::ParentDir) {
+            return Err(anyhow::anyhow!("Invalid input: {}", dir.display()));
+        }
+
         if !dir.exists() {
             log::warn!("Plugin directory does not exist: {:?}", dir);
             return Ok(());
