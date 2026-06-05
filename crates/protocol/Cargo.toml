@@ -2,6 +2,19 @@
 name = "kojacoord-protocol"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Minecraft protocol types, packet (de)serialization and version registry for the Kojacoord proxy."
+documentation = "https://docs.rs/kojacoord-protocol"
+keywords = ["minecraft", "protocol", "proxy", "networking", "kojacoord"]
+categories = ["network-programming", "game-development", "encoding"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 bytes.workspace = true

@@ -2,6 +2,19 @@
 name = "kojacoord-config"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Layered configuration loading and schema for the Kojacoord Minecraft proxy."
+documentation = "https://docs.rs/kojacoord-config"
+keywords = ["minecraft", "proxy", "config", "figment", "kojacoord"]
+categories = ["config", "game-development"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 serde = { workspace = true }

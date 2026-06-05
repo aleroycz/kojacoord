@@ -2,6 +2,19 @@
 name = "kojacoord-plugin-system"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Dynamic plugin loading, lifecycle and host API for the Kojacoord Minecraft proxy."
+documentation = "https://docs.rs/kojacoord-plugin-system"
+keywords = ["minecraft", "proxy", "plugin", "kojacoord", "extensibility"]
+categories = ["game-development", "api-bindings"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 serde = { workspace = true }

@@ -1,0 +1,78 @@
+name: Security
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main, develop ]
+  schedule:
+    # Re-run weekly so newly disclosed advisories are caught even with no commits.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# A newer push to the same ref makes the in-flight scan obsolete.
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # RUSTSEC advisory scan (cargo audit). Kept separate from cargo-deny so a
+  # failure clearly points at "a dependency has a known vulnerability".
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run cargo-audit
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # License / banned-crate / source / advisory policy enforcement (deny.toml).
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans, licenses, sources]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run cargo-deny (${{ matrix.checks }})
+        uses: EmbarkStudios/cargo-deny-action@34899fc7ba81ca6268d5947a7a16b4649013fea1 # v2.0.11
+        with:
+          command: check ${{ matrix.checks }}
+
+  # Software Bill of Materials for the whole workspace, uploaded as an artifact
+  # so every commit has a reproducible inventory of its dependencies.
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate SBOM (SPDX + CycloneDX)
+        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.20.0
+        with:
+          path: .
+          artifact-name: kojacoord-proxy.spdx.json
+          output-file: kojacoord-proxy.spdx.json
+          format: spdx-json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: kojacoord-proxy.spdx.json
+          if-no-files-found: error

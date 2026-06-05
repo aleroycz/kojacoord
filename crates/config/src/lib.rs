@@ -34,6 +34,9 @@ pub struct ProxyConfig {
 
     #[serde(default)]
     pub metrics: MetricsConfig,
+
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +260,40 @@ pub struct MetricsConfig {
 
     #[serde(default)]
     pub retention_hours: u64,
+}
+
+/// Anonymous, opt-out usage telemetry. When enabled, the proxy periodically
+/// posts coarse, non-identifying metrics to the Kojacoord metrics endpoint
+/// (metric.kojacoord.net). Set `enabled = false` to disable it completely — the
+/// proxy then never contacts the endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    #[serde(default = "bool_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_telemetry_endpoint")]
+    pub endpoint: String,
+
+    #[serde(default = "default_telemetry_interval")]
+    pub interval_secs: u64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: default_telemetry_endpoint(),
+            interval_secs: default_telemetry_interval(),
+        }
+    }
+}
+
+fn default_telemetry_endpoint() -> String {
+    "https://metric.kojacoord.net".into()
+}
+fn default_telemetry_interval() -> u64 {
+    // Every 30 minutes is plenty for adoption metrics and is gentle on the endpoint.
+    1800
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

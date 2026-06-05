@@ -47,6 +47,9 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Alex Guy Yann Le Roy"]
 license = "MIT"
+repository = "https://github.com/aleroycz/kojacoord"
+homepage = "https://github.com/aleroycz/kojacoord"
+rust-version = "1.75"
 
 [workspace.dependencies]
 # async runtime
@@ -106,3 +109,24 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# cargo-binstall: install prebuilt release binaries with `cargo binstall kojacoord-proxy`.
+# The release uploads raw binaries (not archives), so pkg-fmt = "bin" and each
+# target maps to its exact release asset name.
+[package.metadata.binstall]
+pkg-fmt = "bin"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/kojacoord-proxy-linux-x86_64"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/kojacoord-proxy-linux-aarch64"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/kojacoord-proxy-windows-x86_64.exe"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/kojacoord-proxy-macos-x86_64"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/kojacoord-proxy-macos-aarch64"

@@ -7,6 +7,7 @@ pub mod proxy;
 pub mod routing;
 pub mod server;
 pub mod session;
+pub mod telemetry;
 
 pub mod data;
 pub mod features;

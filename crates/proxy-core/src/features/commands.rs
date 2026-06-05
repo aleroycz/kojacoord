@@ -33,6 +33,7 @@ pub async fn handle_command(
         "alert" => handle_alert(parts, session, send_message).await,
         "find" => handle_find(parts, state, send_message).await,
         "koja" | "kojacoord" => handle_koja(session, send_message).await,
+        "register" => handle_register(session, state, send_message).await,
         "gplugins" => handle_plugins(state, send_message).await,
         "gtps" => handle_gtps(state, send_message).await,
         _ => CommandResult::NotACommand,
@@ -349,7 +350,68 @@ fn is_proxy_command(input: &str) -> bool {
             | "kojacoord"
             | "gplugins"
             | "gtps"
+            | "register"
     )
+}
+
+/// `/register` — mints a one-time code from the website backend and shows it to
+/// the player so they can link their account at the website's signup page.
+async fn handle_register(
+    session: SharedSession,
+    state: Arc<ProxyState>,
+    send_message: &mut impl FnMut(String),
+) -> CommandResult {
+    let (username, uuid) = {
+        let s = session.read().await;
+        (s.username.clone(), s.uuid)
+    };
+
+    // Shared secret + endpoint. The endpoint reuses the telemetry base URL; the
+    // token is supplied via env so it isn't committed to the config file.
+    let token = std::env::var("KOJA_WEB_LINK_TOKEN").unwrap_or_default();
+    if token.is_empty() {
+        send_message("§cAccount linking is not configured on this server.".to_owned());
+        return CommandResult::Handled;
+    }
+    let base = state
+        .config
+        .telemetry
+        .endpoint
+        .trim_end_matches('/')
+        .to_string();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/auth/link-code"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "username": username, "uuid": uuid.to_string() }))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            let code = body
+                .get("code")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            if code.is_empty() {
+                send_message("§cCould not generate a code, please try again later.".to_owned());
+            } else {
+                send_message("§aAccount linking code generated!".to_owned());
+                send_message(format!("§7Your code: §f§l{code}"));
+                send_message(
+                    "§7Go to §bkojacoord.net/signup §7and enter it within 15 minutes.".to_owned(),
+                );
+            }
+        },
+        _ => {
+            send_message("§cCould not reach the registration service. Try again later.".to_owned());
+        },
+    }
+
+    CommandResult::Handled
 }
 
 pub fn system_message(text: &str) -> String {

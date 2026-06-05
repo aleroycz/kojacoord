@@ -33,6 +33,16 @@ max_speed_blocks_per_tick = 0.7
 max_cps = 20
 store_violations = true
 
+# Anonymous, opt-out usage telemetry. When enabled, the proxy periodically sends
+# coarse, non-identifying metrics (version, OS/arch, peak players, backend count)
+# to help us understand adoption. No IPs, hostnames, server names or player
+# identities are ever sent. Set enabled = false to disable completely — the
+# endpoint is then never contacted.
+[telemetry]
+enabled = true
+endpoint = "https://metric.kojacoord.net"
+interval_secs = 1800
+
 [database]
 # Leave empty to use a local SQLite file (data/proxy.db). For MySQL, supply the
 # URL via the KOJA_DATABASE__URL environment variable / a secret store rather

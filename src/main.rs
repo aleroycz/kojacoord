@@ -111,6 +111,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("{} not found — dashboard API disabled", dash_config);
     }
 
+    // Anonymous, opt-out usage telemetry (metric.kojacoord.net). Honours
+    // [telemetry] enabled in the config; never blocks or fails the proxy.
+    kojacoord_proxy_core::telemetry::spawn(Arc::clone(&state));
+
     kojacoord_proxy_core::proxy::accept_loop(state).await
 }
 

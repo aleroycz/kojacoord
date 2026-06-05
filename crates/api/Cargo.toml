@@ -2,6 +2,19 @@
 name = "kojacoord-api"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Public API types and traits for building plugins and integrations on the Kojacoord proxy."
+documentation = "https://docs.rs/kojacoord-api"
+keywords = ["minecraft", "proxy", "api", "plugin", "kojacoord"]
+categories = ["api-bindings", "game-development"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 tokio = { workspace = true }
