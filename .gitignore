@@ -51,6 +51,10 @@ Thumbs.db
 data/
 *.sql
 
+# But never ignore Rust source modules named `data` (e.g. crates/proxy-core/src/data/)
+!**/src/data/
+!**/src/data/**
+
 # Logs
 *.log
 logs/
