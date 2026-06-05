@@ -161,11 +161,6 @@ fn is_running_as_elevated() -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn is_running_as_elevated() -> bool {
-    unsafe { libc::getuid() == 0 }
-}
-
 #[cfg(not(any(unix, windows)))]
 fn is_running_as_elevated() -> bool {
     false
