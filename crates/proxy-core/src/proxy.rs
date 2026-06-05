@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -66,7 +65,7 @@ impl Default for TpsTracker {
 pub struct ProxyState {
     pub config: Arc<ProxyConfig>,
     pub server_registry: Arc<ServerRegistry>,
-    pub sessions: Arc<RwLock<HashMap<Uuid, SharedSession>>>,
+    pub sessions: Arc<DashMap<Uuid, SharedSession>>,
     pub rsa_key: Arc<rsa::RsaPrivateKey>,
     pub http_client: reqwest::Client,
     pub session_semaphore: Arc<Semaphore>,
@@ -222,6 +221,17 @@ impl ProxyState {
                 tracing::warn!(error = %e, "Failed to initialize cluster coordinator");
             }
 
+            let heartbeat_coord = Arc::clone(&coordinator);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = heartbeat_coord.elect_leader().await {
+                        tracing::warn!(error = %e, "Cluster heartbeat / leader election failed");
+                    }
+                }
+            });
+
             (Some(coordinator), Some(discovery))
         } else {
             (None, None)
@@ -267,7 +277,7 @@ impl ProxyState {
         Ok(Self {
             config: Arc::new(config),
             server_registry: registry,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
             rsa_key,
             http_client,
             session_semaphore,
@@ -300,8 +310,7 @@ impl ProxyState {
 
     pub async fn kick_player(&self, uuid: &Uuid, reason_json: &str) {
         let proto = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(uuid) {
+            match self.sessions.get(uuid) {
                 Some(s) => s.try_read().map(|s| s.protocol_version).ok(),
                 None => None,
             }
@@ -315,8 +324,7 @@ impl ProxyState {
     /// Send a system chat message to a single player by UUID.
     pub async fn send_system_message_to(&self, uuid: &Uuid, text: &str) {
         let proto = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(uuid) {
+            match self.sessions.get(uuid) {
                 Some(s) => s.try_read().map(|s| s.protocol_version).ok(),
                 None => None,
             }
@@ -371,8 +379,9 @@ impl ProxyState {
     }
 
     pub async fn broadcast_system_message(&self, text: &str) {
-        let sessions = self.sessions.read().await;
-        for (uuid, sess) in sessions.iter() {
+        for entry in self.sessions.iter() {
+            let uuid = entry.key();
+            let sess = entry.value();
             let proto = match sess.try_read() {
                 Ok(s) => s.protocol_version,
                 Err(_) => continue,

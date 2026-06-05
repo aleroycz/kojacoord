@@ -1,6 +1,5 @@
 use crate::discovery::ServiceDiscovery;
 use crate::node::{ClusterNode, NodeRole};
-use redis::AsyncCommands;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -52,23 +51,59 @@ impl ClusterCoordinator {
 
         if let Some(client) = &self.redis_client {
             if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
-                let acquired: bool = redis::cmd("SET")
+                let current_leader: Option<String> = redis::cmd("GET")
                     .arg("cluster_leader_lock")
-                    .arg(self.local_node_id.to_string())
-                    .arg("NX")
-                    .arg("EX")
-                    .arg(10)
                     .query_async(&mut conn)
                     .await
-                    .unwrap_or(false);
+                    .ok();
 
-                if acquired {
-                    leader_id = Some(self.local_node_id);
-                } else if let Ok(current_leader) =
-                    conn.get::<_, String>("cluster_leader_lock").await
-                {
-                    if let Ok(parsed) = Uuid::parse_str(&current_leader) {
-                        leader_id = Some(parsed);
+                let is_us = current_leader.as_deref() == Some(&self.local_node_id.to_string());
+
+                if is_us {
+                    // We are the leader, renew the lease atomically
+                    let lua_script = r#"
+                        local key = KEYS[1]
+                        local expected_value = ARGV[1]
+                        local ttl = ARGV[2]
+                        local current = redis.call('GET', key)
+                        if current == expected_value then
+                            redis.call('SETEX', key, ttl, expected_value)
+                            return 1
+                        else
+                            return 0
+                        end
+                    "#;
+
+                    let result: Result<i32, _> = redis::cmd("EVAL")
+                        .arg(lua_script)
+                        .arg(1)
+                        .arg("cluster_leader_lock")
+                        .arg(self.local_node_id.to_string())
+                        .arg(10)
+                        .query_async(&mut conn)
+                        .await;
+
+                    if result.unwrap_or(0) == 1 {
+                        leader_id = Some(self.local_node_id);
+                    }
+                } else {
+                    // We are not leader, try to acquire lock if it's expired
+                    let acquired: bool = redis::cmd("SET")
+                        .arg("cluster_leader_lock")
+                        .arg(self.local_node_id.to_string())
+                        .arg("NX")
+                        .arg("EX")
+                        .arg(10)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap_or(false);
+
+                    if acquired {
+                        leader_id = Some(self.local_node_id);
+                    } else if let Some(current_leader_str) = current_leader {
+                        if let Ok(parsed) = Uuid::parse_str(&current_leader_str) {
+                            leader_id = Some(parsed);
+                        }
                     }
                 }
             }

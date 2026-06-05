@@ -277,8 +277,7 @@ impl ServerManagementServer {
             uuid: player_uuid,
         };
 
-        let sessions = self.state.sessions.read().await;
-        if let Some(target) = sessions.get(&player_uuid) {
+        if let Some(target) = self.state.sessions.get(&player_uuid) {
             if let Some(old_name) = target.read().await.current_server.clone() {
                 if let Some(old) = self.state.server_registry.get(&old_name) {
                     old.player_count.fetch_sub(1, Ordering::Relaxed);
@@ -299,7 +298,6 @@ impl ServerManagementServer {
                 transfer.uuid, transfer.server
             );
 
-            drop(sessions);
             stream.write_all(b"OK: Transfer completed\n").await?;
         } else {
             warn!("Player {} not found in active sessions", transfer.uuid);

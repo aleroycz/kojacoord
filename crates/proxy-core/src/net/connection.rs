@@ -274,12 +274,25 @@ impl ClientConnection {
     pub async fn run(mut self) -> Result<(), ConnectionError> {
         self.state.metrics.record_connection();
 
-        let handshake = self
-            .read_packet::<ServerboundHandshake>()
-            .await
-            .inspect_err(|_| {
+        let handshake = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            self.read_packet::<ServerboundHandshake>(),
+        )
+        .await
+        {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => {
                 self.state.metrics.record_failed_connection();
-            })?;
+                return Err(e);
+            },
+            Err(_) => {
+                self.state.metrics.record_failed_connection();
+                return Err(ConnectionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "handshake timed out",
+                )));
+            },
+        };
 
         self.protocol_version = handshake.protocol_version.0 as u32;
 
@@ -345,25 +358,26 @@ impl ClientConnection {
         let _id = read_varint(&mut self.stream).await?;
 
         let (online_count, sample) = {
-            let sessions = self.state.sessions.read().await;
-            let count = sessions.len();
+            let count = self.state.sessions.len();
             let server_lore = &self.state.config.listeners.server_lore;
 
-            let mut sample: Vec<serde_json::Value> = sessions
-                .values()
+            let mut sample: Vec<serde_json::Value> = self
+                .state
+                .sessions
+                .iter()
                 .take(12)
-                .filter_map(|s| s.try_read().ok())
-                .map(|s| {
-                    let mut player_json = serde_json::json!({
-                        "name": s.username,
-                        "id":   s.uuid.hyphenated().to_string(),
-                    });
-
-                    if let Some(lore) = server_lore {
-                        player_json["lore"] = serde_json::json!(lore);
-                    }
-
-                    player_json
+                .filter_map(|entry| {
+                    let s = entry.value();
+                    s.try_read().ok().map(|g| {
+                        let mut player_json = serde_json::json!({
+                            "name": g.username,
+                            "id": g.uuid.hyphenated().to_string()
+                        });
+                        if let Some(lore) = server_lore {
+                            player_json["lore"] = serde_json::json!(lore);
+                        }
+                        player_json
+                    })
                 })
                 .collect();
 
@@ -413,7 +427,21 @@ impl ClientConnection {
         &mut self,
         original_host: String,
     ) -> Result<SharedSession, ConnectionError> {
-        let login_start = self.read_packet::<ServerboundLoginStart>().await?;
+        let login_start = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            self.read_packet::<ServerboundLoginStart>(),
+        )
+        .await
+        {
+            Ok(Ok(pkt)) => pkt,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(ConnectionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "login start timed out",
+                )))
+            },
+        };
         let username = login_start.username.clone();
 
         let client_uuid = if self.protocol_version >= 761 {
@@ -532,7 +560,21 @@ impl ClientConnection {
             return Err(ConnectionError::Auth("Authentication failed".into()));
         }
 
-        let (enc_shared_secret, enc_verify_token) = self.recv_encryption_response().await?;
+        let (enc_shared_secret, enc_verify_token) = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            self.recv_encryption_response(),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(ConnectionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "encryption response timed out",
+                )))
+            },
+        };
 
         let outbound = auth_pipeline
             .process(
@@ -634,10 +676,7 @@ impl ClientConnection {
             rank,
         }));
 
-        {
-            let mut sessions = self.state.sessions.write().await;
-            sessions.insert(uuid, session.clone());
-        }
+        self.state.sessions.insert(uuid, session.clone());
 
         // Notify plugins that a player joined. A plugin may veto the join by
         // returning a KickPlayer response for this player.
@@ -648,8 +687,21 @@ impl ClientConnection {
                 username: username.clone(),
             })
             .await;
+
+        if !join_kicked {
+            let analytics = self.state.analytics.clone();
+            let analytics_username = username.clone();
+            tokio::spawn(async move {
+                analytics.record_event(kojacoord_metrics::AnalyticsEvent {
+                    timestamp: chrono::Utc::now(),
+                    event_type: kojacoord_metrics::EventType::PlayerJoin,
+                    data: serde_json::json!({ "uuid": uuid.to_string(), "username": analytics_username }),
+                }).await;
+            });
+        }
+
         if join_kicked {
-            self.state.sessions.write().await.remove(&uuid);
+            self.state.sessions.remove(&uuid);
             if let Err(e) = self
                 .send_play_disconnect(r#"{"text":"You were not allowed to join.","color":"red"}"#)
                 .await
@@ -667,8 +719,7 @@ impl ClientConnection {
             Ok(b) => b,
             Err(e) => {
                 {
-                    let mut sessions = self.state.sessions.write().await;
-                    sessions.remove(&uuid);
+                    self.state.sessions.remove(&uuid);
                 }
                 if !client_gone(&e) {
                     let _ = self
@@ -725,16 +776,24 @@ impl ClientConnection {
             }
         };
 
-        {
-            let mut sessions = self.state.sessions.write().await;
-            sessions.remove(&uuid);
-        }
+        self.state.sessions.remove(&uuid);
 
         // Notify plugins that the player left (fire-and-forget).
         let _ = self
             .state
             .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerLeave { uuid })
             .await;
+
+        let analytics = self.state.analytics.clone();
+        tokio::spawn(async move {
+            analytics
+                .record_event(kojacoord_metrics::AnalyticsEvent {
+                    timestamp: chrono::Utc::now(),
+                    event_type: kojacoord_metrics::EventType::PlayerLeave,
+                    data: serde_json::json!({ "uuid": uuid.to_string() }),
+                })
+                .await;
+        });
 
         if let Err(ref e) = result {
             if !client_gone(e) {
