@@ -222,8 +222,19 @@ impl AuthPipeline {
                 let username = username.clone();
                 let client_ip = *client_ip;
 
-                let shared_secret = rsa_decrypt(&self.rsa_key, &shared_secret_enc)?;
-                let decrypted_token = rsa_decrypt(&self.rsa_key, &verify_token_enc)?;
+                let rsa_key_1 = self.rsa_key.clone();
+                let ss_enc = shared_secret_enc.clone();
+                let shared_secret =
+                    tokio::task::spawn_blocking(move || rsa_decrypt(&rsa_key_1, &ss_enc))
+                        .await
+                        .map_err(|_| AuthError::EncryptionSetupFailed("task panic".into()))??;
+
+                let rsa_key_2 = self.rsa_key.clone();
+                let vt_enc = verify_token_enc.clone();
+                let decrypted_token =
+                    tokio::task::spawn_blocking(move || rsa_decrypt(&rsa_key_2, &vt_enc))
+                        .await
+                        .map_err(|_| AuthError::EncryptionSetupFailed("task panic".into()))??;
 
                 if decrypted_token.as_slice() != stored_token.as_slice() {
                     return Err(AuthError::VerifyTokenMismatch);

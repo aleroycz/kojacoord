@@ -17,3 +17,4 @@ kojacoord-protocol = { path = "../protocol" }
 kojacoord-config = { path = "../config" }
 lazy_static = "1"
 bytes = { workspace = true }
+dashmap = { workspace = true }

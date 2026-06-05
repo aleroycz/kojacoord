@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -25,7 +25,7 @@ const MIN_SCAFFOLD_VL: u32 = 5;
 
 pub struct AnticheatEngine {
     config: Arc<RwLock<AnticheatConfig>>,
-    states: Arc<RwLock<HashMap<Uuid, PlayerAnticheatState>>>,
+    states: Arc<DashMap<Uuid, PlayerAnticheatState>>,
     bridge: Option<BridgeClient>,
     alert_system: AlertSystem,
     mod_compat: ModCompatibility,
@@ -43,7 +43,7 @@ impl AnticheatEngine {
 
         Self {
             config: Arc::new(RwLock::new(config)),
-            states: Arc::new(RwLock::new(HashMap::new())),
+            states: Arc::new(DashMap::new()),
             bridge,
             alert_system,
             mod_compat,
@@ -63,8 +63,7 @@ impl AnticheatEngine {
     }
 
     pub async fn register_mod_brand(&self, uuid: Uuid, brand: String) {
-        let mut states = self.states.write().await;
-        let state = states.entry(uuid).or_default();
+        let mut state = self.states.entry(uuid).or_default();
 
         let detected = self.mod_compat.detect_mods_from_brand(&brand);
         state.detected_mods = detected.clone();
@@ -89,8 +88,7 @@ impl AnticheatEngine {
         if !config.enabled {
             return None;
         }
-        let mut states = self.states.write().await;
-        let state = states.entry(uuid).or_default();
+        let mut state = self.states.entry(uuid).or_default();
 
         let dx = x - state.last_x;
         let dy = y - state.last_y;
@@ -125,14 +123,16 @@ impl AnticheatEngine {
         state.on_ground = on_ground;
         state.last_move = Instant::now();
 
-        let should_suppress_speed = self.mod_compat.should_suppress_check(state, "Speed");
-        let should_suppress_flight = self.mod_compat.should_suppress_check(state, "Flight");
-        let should_suppress_nofall = self.mod_compat.should_suppress_check(state, "NoFall");
+        let should_suppress_speed = self.mod_compat.should_suppress_check(&state, "Speed");
+        let should_suppress_flight = self.mod_compat.should_suppress_check(&state, "Flight");
+        let should_suppress_nofall = self.mod_compat.should_suppress_check(&state, "NoFall");
+
+        let mut violation_to_report = None;
 
         if speed > effective + SPEED_EPSILON && !should_suppress_speed {
-            let count = self.increment_violation_count(state, "Speed");
+            let count = self.increment_violation_count(&mut state, "Speed");
             if count >= MIN_SPEED_VL {
-                let v = Violation {
+                violation_to_report = Some(Violation {
                     player_uuid: uuid,
                     check_name: "Speed".into(),
                     check_category: CheckCategory::Movement,
@@ -141,20 +141,16 @@ impl AnticheatEngine {
                     timestamp: chrono::Utc::now(),
                     server_id: None,
                     suppressed: false,
-                };
-                if let Some(bridge) = &self.bridge {
-                    let _ = bridge.report(&v).await;
-                }
-                return Some(v);
+                });
             }
         } else {
-            self.decay_violation(state, "Speed");
+            self.decay_violation(&mut state, "Speed");
         }
 
-        if is_flying && !should_suppress_flight {
-            let count = self.increment_violation_count(state, "Flight");
+        if violation_to_report.is_none() && is_flying && !should_suppress_flight {
+            let count = self.increment_violation_count(&mut state, "Flight");
             if count >= MIN_FLIGHT_VL {
-                let v = Violation {
+                violation_to_report = Some(Violation {
                     player_uuid: uuid,
                     check_name: "Flight".into(),
                     check_category: CheckCategory::Movement,
@@ -163,20 +159,16 @@ impl AnticheatEngine {
                     timestamp: chrono::Utc::now(),
                     server_id: None,
                     suppressed: false,
-                };
-                if let Some(bridge) = &self.bridge {
-                    let _ = bridge.report(&v).await;
-                }
-                return Some(v);
+                });
             }
-        } else {
-            self.decay_violation(state, "Flight");
+        } else if violation_to_report.is_none() {
+            self.decay_violation(&mut state, "Flight");
         }
 
-        if no_fall && !should_suppress_nofall {
-            let count = self.increment_violation_count(state, "NoFall");
+        if violation_to_report.is_none() && no_fall && !should_suppress_nofall {
+            let count = self.increment_violation_count(&mut state, "NoFall");
             if count >= MIN_NOFALL_VL {
-                let v = Violation {
+                violation_to_report = Some(Violation {
                     player_uuid: uuid,
                     check_name: "NoFall".into(),
                     check_category: CheckCategory::Movement,
@@ -185,14 +177,19 @@ impl AnticheatEngine {
                     timestamp: chrono::Utc::now(),
                     server_id: None,
                     suppressed: false,
-                };
-                if let Some(bridge) = &self.bridge {
-                    let _ = bridge.report(&v).await;
-                }
-                return Some(v);
+                });
             }
-        } else {
-            self.decay_violation(state, "NoFall");
+        } else if violation_to_report.is_none() {
+            self.decay_violation(&mut state, "NoFall");
+        }
+
+        drop(state);
+
+        if let Some(v) = violation_to_report {
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.report(&v).await;
+            }
+            return Some(v);
         }
 
         None
@@ -207,8 +204,7 @@ impl AnticheatEngine {
         if !config.enabled {
             return None;
         }
-        let mut states = self.states.write().await;
-        let state = states.entry(uuid).or_default();
+        let mut state = self.states.entry(uuid).or_default();
 
         let now = Instant::now();
         state.recent_attacks.push_back(now);
@@ -223,12 +219,14 @@ impl AnticheatEngine {
         let cps = state.recent_attacks.len() as f64;
         let threshold = f64::from(config.max_cps);
 
-        let should_suppress = self.mod_compat.should_suppress_check(state, "Killaura");
+        let should_suppress = self.mod_compat.should_suppress_check(&state, "Killaura");
+
+        let mut violation_to_report = None;
 
         if cps > threshold && !should_suppress {
-            let count = self.increment_violation_count(state, "Killaura");
+            let count = self.increment_violation_count(&mut state, "Killaura");
             if count >= MIN_COMBAT_VL {
-                let v = Violation {
+                violation_to_report = Some(Violation {
                     player_uuid: uuid,
                     check_name: "Killaura".into(),
                     check_category: CheckCategory::Combat,
@@ -237,41 +235,44 @@ impl AnticheatEngine {
                     timestamp: chrono::Utc::now(),
                     server_id: None,
                     suppressed: false,
-                };
-                if let Some(bridge) = &self.bridge {
-                    let _ = bridge.report(&v).await;
-                }
-                return Some(v);
+                });
             }
         } else {
-            self.decay_violation(state, "Killaura");
+            self.decay_violation(&mut state, "Killaura");
         }
 
-        if let Some(distance) = target_distance {
-            let reach_threshold = 4.5;
-            let should_suppress_reach = self.mod_compat.should_suppress_check(state, "Reach");
+        if violation_to_report.is_none() {
+            if let Some(distance) = target_distance {
+                let reach_threshold = 4.5;
+                let should_suppress_reach = self.mod_compat.should_suppress_check(&state, "Reach");
 
-            if distance > reach_threshold && !should_suppress_reach {
-                let count = self.increment_violation_count(state, "Reach");
-                if count >= MIN_COMBAT_VL {
-                    let v = Violation {
-                        player_uuid: uuid,
-                        check_name: "Reach".into(),
-                        check_category: CheckCategory::Combat,
-                        value: distance,
-                        threshold: reach_threshold,
-                        timestamp: chrono::Utc::now(),
-                        server_id: None,
-                        suppressed: false,
-                    };
-                    if let Some(bridge) = &self.bridge {
-                        let _ = bridge.report(&v).await;
+                if distance > reach_threshold && !should_suppress_reach {
+                    let count = self.increment_violation_count(&mut state, "Reach");
+                    if count >= MIN_COMBAT_VL {
+                        violation_to_report = Some(Violation {
+                            player_uuid: uuid,
+                            check_name: "Reach".into(),
+                            check_category: CheckCategory::Combat,
+                            value: distance,
+                            threshold: reach_threshold,
+                            timestamp: chrono::Utc::now(),
+                            server_id: None,
+                            suppressed: false,
+                        });
                     }
-                    return Some(v);
+                } else {
+                    self.decay_violation(&mut state, "Reach");
                 }
-            } else {
-                self.decay_violation(state, "Reach");
             }
+        }
+
+        drop(state);
+
+        if let Some(v) = violation_to_report {
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.report(&v).await;
+            }
+            return Some(v);
         }
 
         None
@@ -282,11 +283,12 @@ impl AnticheatEngine {
         if !config.enabled {
             return None;
         }
-        let mut states = self.states.write().await;
-        let state = states.entry(uuid).or_default();
+        let mut state = self.states.entry(uuid).or_default();
 
         let now = Instant::now();
         state.packets_sent_in_second += 1;
+
+        let mut violation_to_report = None;
 
         if now.duration_since(state.last_packet_reset).as_secs() >= 1 {
             let pps = state.packets_sent_in_second as f64;
@@ -296,10 +298,11 @@ impl AnticheatEngine {
             state.packets_sent_in_second = 0;
             state.last_packet_reset = now;
 
-            let should_suppress = self.mod_compat.should_suppress_check(state, "Timer");
+            let should_suppress = self.mod_compat.should_suppress_check(&state, "Timer");
 
             if pps > threshold && !should_suppress {
-                let v = Violation {
+                self.increment_violation_count(&mut state, "Timer");
+                violation_to_report = Some(Violation {
                     player_uuid: uuid,
                     check_name: "Timer".into(),
                     check_category: CheckCategory::Network,
@@ -308,13 +311,17 @@ impl AnticheatEngine {
                     timestamp: chrono::Utc::now(),
                     server_id: None,
                     suppressed: false,
-                };
-                self.increment_violation_count(state, "Timer");
-                if let Some(bridge) = &self.bridge {
-                    let _ = bridge.report(&v).await;
-                }
-                return Some(v);
+                });
             }
+        }
+
+        drop(state);
+
+        if let Some(v) = violation_to_report {
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.report(&v).await;
+            }
+            return Some(v);
         }
 
         None
@@ -330,14 +337,16 @@ impl AnticheatEngine {
         if !config.enabled {
             return None;
         }
-        let mut states = self.states.write().await;
-        let state = states.entry(uuid).or_default();
+        let mut state = self.states.entry(uuid).or_default();
+
+        let mut violation_to_report = None;
 
         if sprinting && food_level < 6 {
-            let should_suppress = self.mod_compat.should_suppress_check(state, "AutoSprint");
+            let should_suppress = self.mod_compat.should_suppress_check(&state, "AutoSprint");
 
             if !should_suppress {
-                let v = Violation {
+                self.increment_violation_count(&mut state, "AutoSprint");
+                violation_to_report = Some(Violation {
                     player_uuid: uuid,
                     check_name: "AutoSprint".into(),
                     check_category: CheckCategory::Player,
@@ -346,13 +355,17 @@ impl AnticheatEngine {
                     timestamp: chrono::Utc::now(),
                     server_id: None,
                     suppressed: false,
-                };
-                self.increment_violation_count(state, "AutoSprint");
-                if let Some(bridge) = &self.bridge {
-                    let _ = bridge.report(&v).await;
-                }
-                return Some(v);
+                });
             }
+        }
+
+        drop(state);
+
+        if let Some(v) = violation_to_report {
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.report(&v).await;
+            }
+            return Some(v);
         }
 
         None
@@ -374,21 +387,18 @@ impl AnticheatEngine {
     }
 
     pub async fn get_violation_count(&self, uuid: &Uuid, check_name: &str) -> u32 {
-        let states = self.states.read().await;
-        states
+        self.states
             .get(uuid)
-            .and_then(|s| s.check_violations.get(check_name))
-            .copied()
+            .and_then(|s| s.check_violations.get(check_name).copied())
             .unwrap_or(0)
     }
 
     pub async fn player_quit(&self, uuid: &Uuid) {
-        self.states.write().await.remove(uuid);
+        self.states.remove(uuid);
     }
 
     pub async fn get_player_state(&self, uuid: &Uuid) -> Option<PlayerAnticheatState> {
-        let states = self.states.read().await;
-        states.get(uuid).cloned()
+        self.states.get(uuid).map(|r| r.clone())
     }
 
     pub async fn check_aimbot(
@@ -402,15 +412,12 @@ impl AnticheatEngine {
         if !config.enabled {
             return None;
         }
-        let mut states = self.states.write().await;
-        let state = states.entry(uuid).or_default();
+        let mut state = self.states.entry(uuid).or_default();
 
         let now = Instant::now();
         let time_since_last_check: Duration = now.duration_since(state.last_aim_check);
         state.last_aim_check = now;
 
-        // Skip aimbot checks if they happen too frequently (< 50ms apart)
-        // to avoid false positives from rapid legitimate movements
         if time_since_last_check.as_millis() < 50 {
             return None;
         }
@@ -422,18 +429,20 @@ impl AnticheatEngine {
         state.last_yaw = yaw;
         state.last_pitch = pitch;
 
-        let should_suppress = self.mod_compat.should_suppress_check(state, "Aimbot");
+        let should_suppress = self.mod_compat.should_suppress_check(&state, "Aimbot");
 
         let max_rotation_per_tick = 180.0;
         let min_snapping_threshold = 0.1;
+
+        let mut violation_to_report = None;
 
         if (rotation_delta > max_rotation_per_tick
             || (rotation_delta < min_snapping_threshold && target_distance > 5.0))
             && !should_suppress
         {
-            let count = self.increment_violation_count(state, "Aimbot");
+            let count = self.increment_violation_count(&mut state, "Aimbot");
             if count >= MIN_AIMBOT_VL {
-                let v = Violation {
+                violation_to_report = Some(Violation {
                     player_uuid: uuid,
                     check_name: "Aimbot".into(),
                     check_category: CheckCategory::Combat,
@@ -442,14 +451,19 @@ impl AnticheatEngine {
                     timestamp: chrono::Utc::now(),
                     server_id: None,
                     suppressed: false,
-                };
-                if let Some(bridge) = &self.bridge {
-                    let _ = bridge.report(&v).await;
-                }
-                return Some(v);
+                });
             }
         } else {
-            self.decay_violation(state, "Aimbot");
+            self.decay_violation(&mut state, "Aimbot");
+        }
+
+        drop(state);
+
+        if let Some(v) = violation_to_report {
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.report(&v).await;
+            }
+            return Some(v);
         }
 
         None
@@ -465,10 +479,9 @@ impl AnticheatEngine {
         if !config.enabled {
             return None;
         }
-        let mut states = self.states.write().await;
-        let state = states.entry(uuid).or_default();
+        let mut state = self.states.entry(uuid).or_default();
 
-        let should_suppress = self.mod_compat.should_suppress_check(state, "AutoTool");
+        let should_suppress = self.mod_compat.should_suppress_check(&state, "AutoTool");
 
         let min_switch_time_ms = 50;
         let switches_per_second = if time_delta_ms > 0 {
@@ -482,12 +495,14 @@ impl AnticheatEngine {
             0.0
         };
 
+        let mut violation_to_report = None;
+
         if (switches_per_second > 20.0 || avg_time_per_switch < min_switch_time_ms as f64)
             && !should_suppress
         {
-            let count = self.increment_violation_count(state, "AutoTool");
+            let count = self.increment_violation_count(&mut state, "AutoTool");
             if count >= MIN_AUTOTOOL_VL {
-                let v = Violation {
+                violation_to_report = Some(Violation {
                     player_uuid: uuid,
                     check_name: "AutoTool".into(),
                     check_category: CheckCategory::Player,
@@ -496,14 +511,19 @@ impl AnticheatEngine {
                     timestamp: chrono::Utc::now(),
                     server_id: None,
                     suppressed: false,
-                };
-                if let Some(bridge) = &self.bridge {
-                    let _ = bridge.report(&v).await;
-                }
-                return Some(v);
+                });
             }
         } else {
-            self.decay_violation(state, "AutoTool");
+            self.decay_violation(&mut state, "AutoTool");
+        }
+
+        drop(state);
+
+        if let Some(v) = violation_to_report {
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.report(&v).await;
+            }
+            return Some(v);
         }
 
         None
@@ -520,10 +540,11 @@ impl AnticheatEngine {
         if !config.enabled {
             return None;
         }
-        let mut states = self.states.write().await;
-        let state = states.entry(uuid).or_default();
+        let mut state = self.states.entry(uuid).or_default();
 
-        let should_suppress = self.mod_compat.should_suppress_check(state, "Scaffold");
+        let should_suppress = self.mod_compat.should_suppress_check(&state, "Scaffold");
+
+        let mut violation_to_report = None;
 
         if placing && !on_ground && state.air_ticks > 2 {
             let height_diff = (y - state.last_y).abs();
@@ -532,9 +553,9 @@ impl AnticheatEngine {
                 state.scaffold_ticks += 1;
 
                 if state.scaffold_ticks >= 10 {
-                    let count = self.increment_violation_count(state, "Scaffold");
+                    let count = self.increment_violation_count(&mut state, "Scaffold");
                     if count >= MIN_SCAFFOLD_VL {
-                        let v = Violation {
+                        violation_to_report = Some(Violation {
                             player_uuid: uuid,
                             check_name: "Scaffold".into(),
                             check_category: CheckCategory::Player,
@@ -543,12 +564,8 @@ impl AnticheatEngine {
                             timestamp: chrono::Utc::now(),
                             server_id: None,
                             suppressed: false,
-                        };
-                        if let Some(bridge) = &self.bridge {
-                            let _ = bridge.report(&v).await;
-                        }
+                        });
                         state.scaffold_ticks = 0;
-                        return Some(v);
                     }
                 }
             } else {
@@ -556,7 +573,16 @@ impl AnticheatEngine {
             }
         } else {
             state.scaffold_ticks = 0;
-            self.decay_violation(state, "Scaffold");
+            self.decay_violation(&mut state, "Scaffold");
+        }
+
+        drop(state);
+
+        if let Some(v) = violation_to_report {
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.report(&v).await;
+            }
+            return Some(v);
         }
 
         None

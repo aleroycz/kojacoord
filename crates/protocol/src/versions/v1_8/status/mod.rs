@@ -114,7 +114,7 @@ mod clientbound {
     }
 
     impl PacketId for ClientboundPongResponse {
-        fn packet_id(_ver: u32) -> u8 {
+        fn packet_id(_er: u32) -> u8 {
             0x01
         }
     }
