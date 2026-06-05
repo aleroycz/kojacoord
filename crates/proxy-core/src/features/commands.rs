@@ -72,8 +72,9 @@ async fn handle_ban(
 
     let mut target_uuid = None;
     {
-        let sessions = state.sessions.read().await;
-        for (uuid, sess) in sessions.iter() {
+        for entry in state.sessions.iter() {
+            let sess = entry.value();
+            let uuid = entry.key();
             if let Ok(s) = sess.try_read() {
                 if s.username.eq_ignore_ascii_case(target_name) {
                     target_uuid = Some(*uuid);
@@ -189,8 +190,7 @@ async fn handle_glist(
     state: Arc<ProxyState>,
     send_message: &mut impl FnMut(String),
 ) -> CommandResult {
-    let sessions = state.sessions.read().await;
-    let count = sessions.len();
+    let count = state.sessions.len();
     send_message(format!(
         "§6§lKojacoordNetwork §7— §f{} §7player{} online",
         count,
@@ -198,7 +198,8 @@ async fn handle_glist(
     ));
 
     let mut by_server: HashMap<String, Vec<String>> = HashMap::new();
-    for sess_arc in sessions.values() {
+    for entry in state.sessions.iter() {
+        let sess_arc = entry.value();
         if let Ok(sess) = sess_arc.try_read() {
             let server = sess
                 .current_server
@@ -249,8 +250,8 @@ async fn handle_find(
         send_message("§cUsage: /find <player>".to_owned());
         return CommandResult::Handled;
     }
-    let sessions = state.sessions.read().await;
-    for sess_arc in sessions.values() {
+    for entry in state.sessions.iter() {
+        let sess_arc = entry.value();
         if let Ok(sess) = sess_arc.try_read() {
             if sess.username.eq_ignore_ascii_case(target_name) {
                 let server = sess.current_server.as_deref().unwrap_or("unknown");
@@ -324,8 +325,7 @@ async fn handle_gtps(
     send_message(format!("§eTPS (20s): {}{:.1}", color_tps(tps_20s), tps_20s));
     send_message(format!("§eTPS (30s): {}{:.1}", color_tps(tps_30s), tps_30s));
 
-    let sessions = state.sessions.read().await;
-    let total_players = sessions.len();
+    let total_players = state.sessions.len();
     send_message(format!("§7Online players: §f{}", total_players));
 
     CommandResult::Handled

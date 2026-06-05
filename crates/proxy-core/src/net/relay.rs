@@ -731,8 +731,7 @@ async fn handle_transfer_command(
             None
         },
         transfer::TransferCommand::ConnectOther { server, uuid } => {
-            let sessions = state.sessions.read().await;
-            if let Some(target) = sessions.get(&uuid) {
+            if let Some(target) = state.sessions.get(&uuid) {
                 if let Some(old_name) = target.read().await.current_server.clone() {
                     if let Some(old) = state.server_registry.get(&old_name) {
                         old.player_count.fetch_sub(1, Ordering::Relaxed);
@@ -759,10 +758,10 @@ async fn handle_transfer_command(
         },
         transfer::TransferCommand::GetPlayers => {
             let players: Vec<String> = {
-                let sessions = state.sessions.read().await;
-                sessions
-                    .values()
-                    .filter_map(|s| s.try_read().ok().map(|g| g.username.clone()))
+                state
+                    .sessions
+                    .iter()
+                    .filter_map(|entry| entry.value().try_read().ok().map(|g| g.username.clone()))
                     .filter(|s| !s.is_empty())
                     .collect()
             };

@@ -1,6 +1,5 @@
 use crate::discovery::ServiceDiscovery;
 use crate::node::{ClusterNode, NodeRole};
-use redis::AsyncCommands;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -52,23 +51,44 @@ impl ClusterCoordinator {
 
         if let Some(client) = &self.redis_client {
             if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
-                let acquired: bool = redis::cmd("SET")
+                let current_leader: Option<String> = redis::cmd("GET")
                     .arg("cluster_leader_lock")
-                    .arg(self.local_node_id.to_string())
-                    .arg("NX")
-                    .arg("EX")
-                    .arg(10)
                     .query_async(&mut conn)
                     .await
-                    .unwrap_or(false);
+                    .ok();
 
-                if acquired {
+                let is_us = current_leader.as_deref() == Some(&self.local_node_id.to_string());
+
+                if is_us {
+                    // We are the leader, renew the lease
+                    let _: () = redis::cmd("SET")
+                        .arg("cluster_leader_lock")
+                        .arg(self.local_node_id.to_string())
+                        .arg("XX")
+                        .arg("EX")
+                        .arg(10)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap_or(());
                     leader_id = Some(self.local_node_id);
-                } else if let Ok(current_leader) =
-                    conn.get::<_, String>("cluster_leader_lock").await
-                {
-                    if let Ok(parsed) = Uuid::parse_str(&current_leader) {
-                        leader_id = Some(parsed);
+                } else {
+                    // We are not leader, try to acquire lock if it's expired
+                    let acquired: bool = redis::cmd("SET")
+                        .arg("cluster_leader_lock")
+                        .arg(self.local_node_id.to_string())
+                        .arg("NX")
+                        .arg("EX")
+                        .arg(10)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap_or(false);
+
+                    if acquired {
+                        leader_id = Some(self.local_node_id);
+                    } else if let Some(current_leader_str) = current_leader {
+                        if let Ok(parsed) = Uuid::parse_str(&current_leader_str) {
+                            leader_id = Some(parsed);
+                        }
                     }
                 }
             }

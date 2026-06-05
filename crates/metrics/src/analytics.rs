@@ -56,9 +56,10 @@ impl AnalyticsEngine {
 
     pub async fn record_event(&self, event: AnalyticsEvent) {
         let hour_key = event.timestamp.format("%Y-%m-%d-%H").to_string();
-        let mut entry = self.hourly_buckets.entry(hour_key).or_insert((0, 0));
 
         let mut aggregates = self.aggregates.write().await;
+        let mut entry = self.hourly_buckets.entry(hour_key).or_insert((0, 0));
+
         match &event.event_type {
             EventType::PlayerJoin => {
                 entry.0 += 1;
@@ -82,6 +83,7 @@ impl AnalyticsEngine {
             },
             _ => {},
         }
+        drop(entry);
 
         // Cleanup old buckets (roughly by checking keys)
         let cutoff = Utc::now() - chrono::Duration::hours(self.retention_hours as i64);

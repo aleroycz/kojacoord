@@ -51,8 +51,9 @@ pub async fn list_players(
     let mut online: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     {
-        let sessions = state.proxy.sessions.read().await;
-        for (uuid, sess) in sessions.iter() {
+        for entry in state.proxy.sessions.iter() {
+            let uuid = entry.key();
+            let sess = entry.value();
             if let Ok(s) = sess.try_read() {
                 online.insert(uuid.hyphenated().to_string(), s.current_server.clone());
             }
@@ -97,16 +98,19 @@ pub async fn kick_player(
 ) -> Result<Json<Value>, AppError> {
     auth::require_moderator(&auth.0)?;
 
+    let mut reason = body.reason.clone();
+    reason.truncate(1024);
+
     sqlx::query("INSERT INTO player_kicks (player_uuid, reason, kicked_by) VALUES (?, ?, ?)")
         .bind(&uuid)
-        .bind(&body.reason)
+        .bind(&reason)
         .bind(&auth.0.sub)
         .execute(&state.pool)
         .await?;
 
     if let Ok(target) = uuid::Uuid::parse_str(&uuid) {
         let kick_json = json!({
-            "text": format!("You were kicked: {}", body.reason),
+            "text": format!("You were kicked: {}", reason),
             "color": "red"
         })
         .to_string();
@@ -129,12 +133,15 @@ pub async fn ban_player(
         .duration_hours
         .map(|h| chrono::Utc::now() + chrono::Duration::hours(h));
 
+    let mut reason = body.reason.clone();
+    reason.truncate(1024);
+
     let ban_id = sqlx::query(
         "INSERT INTO player_bans (player_uuid, reason, banned_by, expires_at, active) \
          VALUES (?, ?, ?, ?, 1)",
     )
     .bind(&uuid)
-    .bind(&body.reason)
+    .bind(&reason)
     .bind(&auth.0.sub)
     .bind(expires_at)
     .execute(&state.pool)
@@ -148,7 +155,7 @@ pub async fn ban_player(
 
     if let Ok(target) = uuid::Uuid::parse_str(&uuid) {
         let kick_json = json!({
-            "text": format!("You have been banned: {}", body.reason),
+            "text": format!("You have been banned: {}", reason),
             "color": "red"
         })
         .to_string();

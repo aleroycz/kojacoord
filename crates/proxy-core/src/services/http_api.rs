@@ -72,7 +72,7 @@ async fn health(State(st): State<ApiState>) -> impl IntoResponse {
 
     let backends = proxy.server_registry.all();
     let backends_online = backends.iter().filter(|b| b.is_online()).count();
-    let players_online = proxy.sessions.read().await.len();
+    let players_online = proxy.sessions.len();
 
     let healthy = backends_online > 0 && (!db_configured || db_healthy);
 
@@ -105,9 +105,10 @@ async fn players(State(st): State<ApiState>, headers: HeaderMap) -> impl IntoRes
         );
     }
 
-    let sessions = st.proxy.sessions.read().await;
-    let mut list = Vec::with_capacity(sessions.len());
-    for (uuid, sess) in sessions.iter() {
+    let mut list = Vec::with_capacity(st.proxy.sessions.len());
+    for entry in st.proxy.sessions.iter() {
+        let sess = entry.value();
+        let uuid = entry.key();
         if let Ok(s) = sess.try_read() {
             list.push(json!({
                 "uuid": uuid.hyphenated().to_string(),
@@ -159,10 +160,13 @@ async fn ban(
         );
     };
 
-    let reason = req
+    let mut reason = req
         .reason
         .unwrap_or_else(|| "Banned by an operator".to_owned());
-    let banned_by = req.banned_by.unwrap_or_else(|| "dashboard".to_owned());
+    reason.truncate(1024);
+
+    let mut banned_by = req.banned_by.unwrap_or_else(|| "dashboard".to_owned());
+    banned_by.truncate(256);
 
     if let Err(e) = db.insert_ban(uuid, &reason, &banned_by, None).await {
         tracing::warn!(error = %e, "dashboard ban failed");
