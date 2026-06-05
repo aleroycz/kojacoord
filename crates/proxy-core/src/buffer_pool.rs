@@ -14,6 +14,7 @@ pub struct BufferPool {
 
 const SMALL_MAX: usize = 2_048;
 const MEDIUM_MAX: usize = 32_768;
+const LARGE_MAX: usize = 524_288;
 
 const SMALL_DEPTH: usize = 64;
 const MEDIUM_DEPTH: usize = 64;
@@ -49,16 +50,15 @@ impl BufferPool {
     pub fn release(&self, mut buffer: BytesMut) {
         buffer.clear();
         let cap = buffer.capacity();
-        let pool = if cap <= SMALL_MAX {
-            &self.small
-        } else if cap <= MEDIUM_MAX {
-            &self.medium
-        } else {
-            &self.large
-        };
 
-        // If the pool is full, the buffer will simply be dropped and memory freed.
-        let _ = pool.push(buffer);
+        if cap <= SMALL_MAX {
+            let _ = self.small.push(buffer);
+        } else if cap <= MEDIUM_MAX {
+            let _ = self.medium.push(buffer);
+        } else if cap <= LARGE_MAX {
+            let _ = self.large.push(buffer);
+        }
+        // If cap > LARGE_MAX, buffer is dropped (not cached)
     }
 
     pub fn depths(&self) -> (usize, usize, usize) {
