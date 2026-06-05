@@ -58,6 +58,13 @@ impl PluginVerifier {
 
     /// Compute the hex-encoded SHA-256 digest of a file.
     pub fn file_sha256(path: &Path) -> Result<String> {
+        // Prevent path traversal attacks by rejecting paths containing '..'.
+        if path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            bail!("Invalid input: {}", path.display());
+        }
         let bytes =
             std::fs::read(path).with_context(|| format!("reading plugin {}", path.display()))?;
         let mut hasher = Sha256::new();
