@@ -41,6 +41,15 @@ pub fn verify_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::e
     Ok(data.claims)
 }
 
+/// Authorize a raw bearer token string against the configured JWT secret.
+///
+/// Shared by the header-based [`AuthUser`] extractor and by endpoints that
+/// cannot use the `Authorization` header (browser `WebSocket` / `EventSource`
+/// connections), which instead pass the JWT via a `token` query parameter.
+pub fn authorize(state: &AppState, token: &str) -> Result<Claims, AppError> {
+    verify_token(token, &state.cfg.jwt.secret).map_err(|_| AppError::Unauthorized)
+}
+
 pub struct AuthUser(pub Claims);
 
 #[async_trait]

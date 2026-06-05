@@ -38,6 +38,11 @@ spec:
           value: "true"
         - name: RUST_LOG
           value: "info"
+        # Secrets (DB URL, control-plane tokens) are injected from a Secret as
+        # KOJA_*__* env vars, which override the TOML config at startup.
+        envFrom:
+        - secretRef:
+            name: kojacoord-secrets
         volumeMounts:
         - name: config
           mountPath: /app/config.toml

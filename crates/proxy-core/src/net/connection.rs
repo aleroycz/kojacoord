@@ -639,6 +639,26 @@ impl ClientConnection {
             sessions.insert(uuid, session.clone());
         }
 
+        // Notify plugins that a player joined. A plugin may veto the join by
+        // returning a KickPlayer response for this player.
+        let join_kicked = self
+            .state
+            .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerJoin {
+                uuid,
+                username: username.clone(),
+            })
+            .await;
+        if join_kicked {
+            self.state.sessions.write().await.remove(&uuid);
+            if let Err(e) = self
+                .send_play_disconnect(r#"{"text":"You were not allowed to join.","color":"red"}"#)
+                .await
+            {
+                tracing::debug!(error = %e, "failed sending plugin-veto disconnect");
+            }
+            return Err(ConnectionError::Auth("join rejected by plugin".into()));
+        }
+
         let backend_result = self
             .connect_to_backend(&username, session.clone(), &original_host, uuid)
             .await;
@@ -709,6 +729,12 @@ impl ClientConnection {
             let mut sessions = self.state.sessions.write().await;
             sessions.remove(&uuid);
         }
+
+        // Notify plugins that the player left (fire-and-forget).
+        let _ = self
+            .state
+            .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerLeave { uuid })
+            .await;
 
         if let Err(ref e) = result {
             if !client_gone(e) {

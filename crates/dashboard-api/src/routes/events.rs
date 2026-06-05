@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     response::{sse::Event, Sse},
     Json,
 };
@@ -9,18 +9,35 @@ use serde_json::{json, Value};
 use std::{convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::{error::AppError, events::DashboardEvent, routes::AppState};
+use crate::{auth, error::AppError, events::DashboardEvent, routes::AppState};
+
+#[derive(Deserialize)]
+pub struct EventsAuth {
+    /// JWT passed as a query parameter because browser `EventSource` clients
+    /// cannot set the `Authorization` header.
+    pub token: Option<String>,
+}
 
 pub async fn sse_events(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl futures_util::stream::Stream<Item = Result<Event, Infallible>>> {
+    Query(q): Query<EventsAuth>,
+) -> Result<Sse<impl futures_util::stream::Stream<Item = Result<Event, Infallible>>>, AppError> {
+    // The event bus streams player PII and live network activity, so require a
+    // valid token before subscribing an anonymous client.
+    let token = q
+        .token
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .ok_or(AppError::Unauthorized)?;
+    auth::authorize(&state, token)?;
+
     let rx = state.event_bus.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| async move {
         result
             .ok()
             .and_then(|event| event.to_sse_event().ok().map(Ok))
     });
-    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
 #[derive(Deserialize)]

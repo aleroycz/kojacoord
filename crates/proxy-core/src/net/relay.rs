@@ -15,7 +15,7 @@ use crate::{
     commands,
     converter::{ConversionDirection, ConversionResult, PacketConverter},
     error::ConnectionError,
-    exploit_guard::{build_kick_message, check_chat_message, KickReason},
+    exploit_guard::{build_kick_message, check_chat_message, ExploitGuard, KickReason},
     modloader,
     packet_builder::{
         build_brand_packet, build_disconnect_packet, build_plugin_message_packet,
@@ -329,6 +329,7 @@ impl PacketRelay {
         };
 
         let c2s = async move {
+            let mut exploit_guard = ExploitGuard::new();
             let result: Result<(), ConnectionError> = async move {
                 loop {
                     if stopped_c2s_chk.load(Ordering::Acquire) {
@@ -339,6 +340,14 @@ impl PacketRelay {
                         _ = stop_c2s_wait.notified() => return Ok(()),
                         r = read_packet(&mut *cr_mut, client_thresh) => r?,
                     };
+
+                    // Per-connection abuse guard: enforce inbound packet-rate and
+                    // per-packet size ceilings before any further processing.
+                    if let Err(reason) = exploit_guard.check_packet(payload.len()) {
+                        let username = session_c2s.read().await.username.clone();
+                        tracing::warn!(username = %username, ?reason, "exploit_guard: kicking client");
+                        kick!(cw_c2s, reason, proto, client_thresh);
+                    }
 
                     let mut cur = payload.clone();
 
@@ -525,6 +534,18 @@ impl PacketRelay {
                                     "exploit_guard: illegal chat — kicking"
                                 );
                                 kick!(cw_c2s, reason, proto, client_thresh);
+                            }
+
+                            // Deliver chat to plugins (handle_event). A plugin may
+                            // request a kick, in which case we stop relaying.
+                            if state_c2s
+                                .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerChat {
+                                    uuid,
+                                    message: text.clone(),
+                                })
+                                .await
+                            {
+                                return Ok(());
                             }
 
                             if text.starts_with('/') {

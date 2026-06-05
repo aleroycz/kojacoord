@@ -3,7 +3,6 @@ use crate::integrity::PluginVerifier;
 use anyhow::{Context, Result};
 use libloading::{Library, Symbol};
 use std::path::Path;
-use std::sync::Arc;
 
 pub struct PluginLoader {
     libraries: Vec<(String, Library)>,
@@ -35,7 +34,7 @@ impl PluginLoader {
         &mut self,
         path: P,
         context: &PluginContext,
-    ) -> Result<(Arc<dyn Plugin>, PluginMetadata)> {
+    ) -> Result<(Box<dyn Plugin>, PluginMetadata)> {
         let path = path.as_ref();
 
         // Verify the binary's integrity BEFORE mapping it into the process.
@@ -48,10 +47,10 @@ impl PluginLoader {
         // SAFETY: Loading a native library and calling its FFI entry points is
         // inherently unsafe — we trust that a verified plugin exports
         // `get_metadata`/`create_plugin` with the documented C ABI and that
-        // `create_plugin` returns a heap-allocated `*mut dyn Plugin` ownership
-        // of which is transferred to us (reconstructed via `Arc::from_raw`).
+        // `create_plugin` returns a heap-allocated `*mut dyn Plugin` whose
+        // ownership is transferred to us (reconstructed via `Box::from_raw`).
         // The library handle is retained in `self.libraries` so the code backing
-        // the returned `Arc` stays mapped for the plugin's lifetime.
+        // the returned plugin stays mapped for its lifetime.
         unsafe {
             let library = Library::new(path).context("Failed to load plugin library")?;
 
@@ -74,11 +73,14 @@ impl PluginLoader {
                 .context("Missing create_plugin symbol")?;
 
             let plugin_ptr = create_plugin();
-            let mut plugin = Arc::from_raw(plugin_ptr);
+            if plugin_ptr.is_null() {
+                return Err(anyhow::anyhow!("create_plugin returned a null pointer"));
+            }
+            // Own the plugin as a Box so callers can take `&mut` (needed for
+            // on_load / on_enable / register_packet_hooks / handle_event).
+            let mut plugin: Box<dyn Plugin> = Box::from_raw(plugin_ptr);
 
-            Arc::get_mut(&mut plugin)
-                .ok_or_else(|| anyhow::anyhow!("Failed to get mutable reference to plugin"))?
-                .on_load(context)?;
+            plugin.on_load(context)?;
 
             self.libraries.push((metadata.name.clone(), library));
 

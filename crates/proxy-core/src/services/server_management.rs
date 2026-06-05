@@ -119,7 +119,10 @@ impl ServerManagementServer {
     ) -> anyhow::Result<()> {
         debug!("Received server registration from {}", registration.name);
 
-        if registration.auth_token != self.auth_token {
+        if !crate::services::constant_time_eq(
+            registration.auth_token.as_bytes(),
+            self.auth_token.as_bytes(),
+        ) {
             warn!("Invalid auth token from server {}", registration.name);
             stream.write_all(b"ERROR: Invalid auth token\n").await?;
             return Ok(());
@@ -170,7 +173,10 @@ impl ServerManagementServer {
     ) -> anyhow::Result<()> {
         debug!("Received status update from server {}", status_update.name);
 
-        if status_update.auth_token != self.auth_token {
+        if !crate::services::constant_time_eq(
+            status_update.auth_token.as_bytes(),
+            self.auth_token.as_bytes(),
+        ) {
             warn!(
                 "Invalid auth token for status update from server {}",
                 status_update.name
@@ -212,7 +218,10 @@ impl ServerManagementServer {
             deregistration.name
         );
 
-        if deregistration.auth_token != self.auth_token {
+        if !crate::services::constant_time_eq(
+            deregistration.auth_token.as_bytes(),
+            self.auth_token.as_bytes(),
+        ) {
             warn!(
                 "Invalid auth token for deregistration from server {}",
                 deregistration.name
@@ -246,7 +255,10 @@ impl ServerManagementServer {
         transfer: PlayerTransfer,
         stream: &mut TcpStream,
     ) -> anyhow::Result<()> {
-        if transfer.auth_token != self.auth_token {
+        if !crate::services::constant_time_eq(
+            transfer.auth_token.as_bytes(),
+            self.auth_token.as_bytes(),
+        ) {
             warn!("Invalid auth token for player transfer");
             stream.write_all(b"ERROR: Invalid auth token\n").await?;
             return Ok(());

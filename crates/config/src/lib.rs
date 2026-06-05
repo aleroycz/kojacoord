@@ -59,6 +59,12 @@ pub struct ProxySection {
     #[serde(default = "default_session_timeout")]
     pub session_timeout_secs: u64,
 
+    /// New connections allowed per source IP within a short window before a
+    /// temporary ban. `0` disables connection throttling. Defaults to a value
+    /// tolerant of shared/CGNAT addresses.
+    #[serde(default = "default_max_conns_per_ip")]
+    pub max_connections_per_ip: u32,
+
     #[serde(default = "default_lobby_name")]
     pub lobby_server_name: String,
     #[serde(default)]
@@ -84,6 +90,7 @@ impl Default for ProxySection {
             max_players: default_max_players(),
             prevent_proxy_connections: false,
             session_timeout_secs: default_session_timeout(),
+            max_connections_per_ip: default_max_conns_per_ip(),
             lobby_server_name: default_lobby_name(),
             lobby_server_protocol: 47,
             server_id: generate_server_id(),
@@ -278,7 +285,9 @@ fn default_http_bind() -> String {
     "127.0.0.1:8081".into()
 }
 fn default_http_token() -> String {
-    "changeme".into()
+    // Intentionally empty: a real secret must be configured (or is auto-generated
+    // on first run). Validation rejects empty/placeholder tokens at startup.
+    String::new()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -343,6 +352,9 @@ fn default_motd() -> String {
 fn default_session_timeout() -> u64 {
     5
 }
+fn default_max_conns_per_ip() -> u32 {
+    8
+}
 fn default_db_pool_size() -> u32 {
     10
 }
@@ -360,13 +372,25 @@ fn default_lobby_name() -> String {
     "lobby".into()
 }
 fn default_management_enabled() -> bool {
-    true
+    // Opt-in: the management TCP control plane is an advanced clustering feature
+    // and should not be exposed unless explicitly enabled with a strong token.
+    false
 }
 fn default_management_bind() -> String {
     "127.0.0.1:25566".into()
 }
 fn default_management_auth_token() -> String {
-    "changeme".into()
+    // Intentionally empty: see default_http_token().
+    String::new()
+}
+
+/// Generate a cryptographically-strong random secret suitable for auth tokens.
+pub fn generate_secret() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 fn default_auth_url() -> String {
@@ -380,17 +404,133 @@ fn generate_server_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Minimum acceptable length (in bytes) for any operational secret/token.
+pub const MIN_SECRET_LEN: usize = 16;
+
+/// Well-known placeholder secrets that must never be used in production.
+pub const FORBIDDEN_SECRETS: &[&str] = &[
+    "changeme",
+    "change-me",
+    "change_me",
+    "change_this_token_in_production",
+    "secret",
+    "default",
+    "placeholder",
+    "password",
+    "token",
+    "your-secret-token",
+    "your-api-token",
+];
+
+fn is_forbidden_secret(value: &str) -> bool {
+    let lowered = value.trim().to_ascii_lowercase();
+    FORBIDDEN_SECRETS
+        .iter()
+        .any(|bad| lowered == *bad || lowered.contains(bad))
+}
+
+/// Validate a named secret: must be present, long enough, and not a placeholder.
+fn validate_secret(name: &str, value: &str) -> Result<(), anyhow::Error> {
+    let v = value.trim();
+    if v.is_empty() {
+        anyhow::bail!(
+            "{name} is empty; set a unique, randomly generated value \
+             (e.g. `openssl rand -hex 32`)."
+        );
+    }
+    if v.len() < MIN_SECRET_LEN {
+        anyhow::bail!(
+            "{name} is too short ({} bytes); it must be at least {} bytes.",
+            v.len(),
+            MIN_SECRET_LEN
+        );
+    }
+    if is_forbidden_secret(v) {
+        anyhow::bail!(
+            "{name} matches a well-known placeholder value; \
+             set a unique, randomly generated secret."
+        );
+    }
+    Ok(())
+}
+
 impl ProxyConfig {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, anyhow::Error> {
         use figment::{
             providers::{Env, Format, Toml},
             Figment,
         };
-        let config = Figment::new()
+        // Environment overrides use `__` to denote nesting so secrets can be
+        // injected without baking them into the TOML, e.g.
+        //   KOJA_HTTP_API__AUTH_TOKEN, KOJA_SERVER_MANAGEMENT__AUTH_TOKEN,
+        //   KOJA_DATABASE__URL, KOJA_FORWARDING__VELOCITY_SECRET
+        let config: ProxyConfig = Figment::new()
             .merge(Toml::file(path.as_ref()))
-            .merge(Env::prefixed("KOJA_").global())
+            .merge(Env::prefixed("KOJA_").split("__").global())
             .extract()?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Replace any empty/placeholder secret for an *enabled* control plane with a
+    /// freshly generated strong token. Returns `true` if anything changed (so the
+    /// caller can persist the updated config). Used on first run to make the proxy
+    /// secure-by-default without operator action.
+    pub fn ensure_secrets(&mut self) -> bool {
+        let mut changed = false;
+        if self.server_management.enabled
+            && (self.server_management.auth_token.trim().is_empty()
+                || is_forbidden_secret(&self.server_management.auth_token))
+        {
+            self.server_management.auth_token = generate_secret();
+            changed = true;
+        }
+        if self.http_api.enabled
+            && (self.http_api.auth_token.trim().is_empty()
+                || is_forbidden_secret(&self.http_api.auth_token))
+        {
+            self.http_api.auth_token = generate_secret();
+            changed = true;
+        }
+        changed
+    }
+
+    /// Fail fast on insecure security-sensitive configuration so the proxy never
+    /// starts with publicly-known credentials or a forgeable forwarding secret.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        // Server-management control plane: only enforce when the feature is on.
+        if self.server_management.enabled {
+            validate_secret(
+                "server_management.auth_token",
+                &self.server_management.auth_token,
+            )?;
+        }
+
+        // HTTP API control plane.
+        if self.http_api.enabled {
+            validate_secret("http_api.auth_token", &self.http_api.auth_token)?;
+        }
+
+        // Velocity modern forwarding relies entirely on the shared HMAC secret;
+        // a weak/placeholder secret makes forwarded identity forgeable.
+        if matches!(self.forwarding.mode, ForwardingMode::Velocity) {
+            validate_secret(
+                "forwarding.velocity_secret",
+                &self.forwarding.velocity_secret,
+            )?;
+        }
+
+        // Legacy BungeeCord forwarding is unauthenticated by design: warn loudly
+        // so operators firewall their backends.
+        if matches!(self.forwarding.mode, ForwardingMode::Bungeecord) {
+            tracing::warn!(
+                "forwarding.mode = bungeecord uses UNSIGNED legacy forwarding. Backends MUST \
+                 only accept connections from this proxy (firewall them), otherwise players can \
+                 spoof identities. Prefer Velocity modern forwarding with a strong secret."
+            );
+        }
+
+        Ok(())
     }
 }
 

@@ -25,7 +25,7 @@ data:
     backend_type = "vanilla"
 
     [database]
-    url = "mysql://user:password@mysql-service:3306/kojacoord"
+    # Injected at runtime via KOJA_DATABASE__URL from the kojacoord-secrets Secret.
     max_connections = 10
 
     [anticheat]
@@ -33,14 +33,16 @@ data:
     strict_mode = false
 
     [server_management]
+    # NOTE: bound to 0.0.0.0 for in-cluster access — restrict reachability with a
+    # NetworkPolicy so only trusted backends can connect. auth_token is injected
+    # via KOJA_SERVER_MANAGEMENT__AUTH_TOKEN from the kojacoord-secrets Secret.
     enabled = true
     bind = "0.0.0.0:8080"
-    auth_token = "CHANGE_THIS_TOKEN_IN_PRODUCTION"
 
     [http_api]
+    # auth_token injected via KOJA_HTTP_API__AUTH_TOKEN from the Secret.
     enabled = true
     bind = "0.0.0.0:8081"
-    auth_token = "CHANGE_THIS_TOKEN_IN_PRODUCTION"
 
     [cluster]
     enabled = false

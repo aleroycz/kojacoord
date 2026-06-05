@@ -6,154 +6,124 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Avoid overlapping release runs for the same ref clobbering each other.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
 
 jobs:
-  publish-crates:
-    name: Publish to crates.io
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      
-      - name: Login to crates.io
-        run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      
-      - name: Publish plugin API
-        run: |
-          cd crates/plugin-system
-          cargo publish
-      
-      - name: Publish protocol crate
-        run: |
-          cd crates/protocol
-          cargo publish
-      
-      - name: Publish config crate
-        run: |
-          cd crates/config
-          cargo publish
-
   build-release:
-    name: Build Release
-    needs: publish-crates
+    name: Build Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      # Do NOT cancel the other targets when one fails — otherwise a single
+      # failing target shows the whole release as "cancelled" with no error.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: kojacoord-proxy-linux-x86_64
-            asset_name: kojacoord-proxy-linux-x86_64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: kojacoord-proxy-linux-aarch64
-            asset_name: kojacoord-proxy-linux-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: kojacoord-proxy-windows-x86_64.exe
-            asset_name: kojacoord-proxy-windows-x86_64.exe
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: kojacoord-proxy-macos-x86_64
-            asset_name: kojacoord-proxy-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: kojacoord-proxy-macos-aarch64
-            asset_name: kojacoord-proxy-macos-aarch64
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      
+
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
-      
-      - name: Cache cargo registry
-        uses: actions/cache@v3
+
+      # Tell Cargo which linker to use for the aarch64 target. Without this the
+      # build fails at the link step (and previously cancelled the whole matrix).
+      - name: Configure ARM64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Cache cargo & build
+        uses: actions/cache@v4
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Cache cargo index
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Cache cargo build
-        uses: actions/cache@v3
-        with:
-          path: target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-      
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-      
+        run: cargo build --release --bin kojacoord-proxy --target ${{ matrix.target }}
+
       - name: Prepare artifact
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/${{ matrix.target }}/release/kojacoord-proxy.exe ${{ matrix.artifact_name }}
+            cp "target/${{ matrix.target }}/release/kojacoord-proxy.exe" "${{ matrix.artifact_name }}"
           else
-            cp target/${{ matrix.target }}/release/kojacoord-proxy ${{ matrix.artifact_name }}
+            cp "target/${{ matrix.target }}/release/kojacoord-proxy" "${{ matrix.artifact_name }}"
           fi
-      
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_name }}
+          if-no-files-found: error
 
   create-release:
     name: Create GitHub Release
     needs: build-release
     runs-on: ubuntu-latest
+    # Only publish a GitHub Release for tag pushes; manual dispatch just builds.
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
       id-token: write
       attestations: write
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
-      
+
       - name: Display structure of downloaded files
         run: ls -R artifacts
-      
+
       - name: Extract version from tag
         id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-      
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
       - name: Generate release notes
-        id: release_notes
         run: |
           cat > release_notes.md << EOF
           ## Kojacoord Proxy ${{ steps.get_version.outputs.VERSION }}
-          
-          ### Changes
-          See the git log for detailed changes.
-          
+
           ### Downloads
           Choose the appropriate binary for your platform:
           - Linux x86_64: kojacoord-proxy-linux-x86_64
@@ -161,16 +131,16 @@ jobs:
           - Windows x86_64: kojacoord-proxy-windows-x86_64.exe
           - macOS x86_64: kojacoord-proxy-macos-x86_64
           - macOS ARM64: kojacoord-proxy-macos-aarch64
-          
+
           ### Installation
           1. Download the binary for your platform
           2. Make it executable (Linux/macOS): chmod +x kojacoord-proxy-*
           3. Run the binary: ./kojacoord-proxy-*
-          
+
           ### Documentation
           See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for usage instructions.
           EOF
-      
+
       - name: Create Release
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
@@ -179,35 +149,60 @@ jobs:
           body_path: release_notes.md
           draft: false
           prerelease: false
+          # download-artifact@v4 places each artifact in its own subdirectory.
           files: artifacts/*/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: artifacts/*/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-plugin-builder:
     name: Build Plugin Builder
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      
+
       - name: Build plugin builder
-        run: |
-          cd cargo-kpl
-          cargo build --release
-      
+        run: cargo build --release --bin cargo-kpl
+
       - name: Upload plugin builder artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: cargo-kpl-linux-x86_64
           path: target/release/cargo-kpl
+          if-no-files-found: error
+
+  # Publishing to crates.io is best-effort and intentionally decoupled from the
+  # binary release: a publish failure (e.g. a version that already exists) must
+  # never cancel or block the GitHub Release. Runs only on tag pushes.
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Publish crates (best-effort, in dependency order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set +e
+          for crate in protocol config plugin-system; do
+            echo "::group::publish $crate"
+            cargo publish --manifest-path "crates/$crate/Cargo.toml" --no-verify
+            echo "exit=$? (non-fatal)"
+            echo "::endgroup::"
+          done
+          exit 0

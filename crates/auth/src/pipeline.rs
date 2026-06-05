@@ -16,6 +16,12 @@ pub enum AuthType {
     Microsoft,
 }
 
+/// Validate a Minecraft username: 1–16 characters of `[A-Za-z0-9_]`.
+pub fn is_valid_username(name: &str) -> bool {
+    let len = name.len();
+    (1..=16).contains(&len) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 #[derive(Debug)]
 pub enum AuthEvent {
     LoginStart {
@@ -168,6 +174,13 @@ impl AuthPipeline {
                     AuthEvent::LoginStart { username, .. } => username.clone(),
                     _ => return Err(AuthError::EncryptionSetupFailed("unexpected event".into())),
                 };
+
+                // Validate the client-supplied username before it is used as an
+                // identity (offline UUID) or sent to the session server. Enforce
+                // the canonical Minecraft rules: 1–16 chars, [A-Za-z0-9_].
+                if !is_valid_username(&username) {
+                    return Err(AuthError::InvalidUsername);
+                }
 
                 if !self.config.online_mode {
                     let uuid = offline_uuid(&username);

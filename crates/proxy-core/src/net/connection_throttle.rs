@@ -4,9 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-const MAX_CONNECTIONS_PER_IP: u32 = 3;
-const CONNECTION_WINDOW: Duration = Duration::from_secs(5);
-const TEMP_BAN_DURATION: Duration = Duration::from_secs(300);
+/// New connections allowed per IP within [`CONNECTION_WINDOW`] before a
+/// temporary ban. Default tuned to tolerate shared/CGNAT addresses; operators
+/// can override via `proxy.max_connections_per_ip`. `0` disables throttling.
+const DEFAULT_MAX_CONNECTIONS_PER_IP: u32 = 8;
+const CONNECTION_WINDOW: Duration = Duration::from_secs(3);
+const TEMP_BAN_DURATION: Duration = Duration::from_secs(120);
 
 #[derive(Debug)]
 struct IpRecord {
@@ -18,6 +21,7 @@ struct IpRecord {
 #[derive(Clone, Debug)]
 pub struct ConnectionThrottle {
     records: Arc<Mutex<HashMap<IpAddr, IpRecord>>>,
+    max_per_ip: u32,
 }
 
 impl Default for ConnectionThrottle {
@@ -28,12 +32,23 @@ impl Default for ConnectionThrottle {
 
 impl ConnectionThrottle {
     pub fn new() -> Self {
+        Self::with_max_per_ip(DEFAULT_MAX_CONNECTIONS_PER_IP)
+    }
+
+    /// Build a throttle with a custom per-IP limit. A value of `0` disables
+    /// throttling entirely (every connection is allowed).
+    pub fn with_max_per_ip(max_per_ip: u32) -> Self {
         Self {
             records: Arc::new(Mutex::new(HashMap::new())),
+            max_per_ip,
         }
     }
 
     pub async fn check(&self, ip: IpAddr) -> Result<(), &'static str> {
+        if self.max_per_ip == 0 {
+            return Ok(());
+        }
+
         let mut map = self.records.lock().await;
         let now = Instant::now();
 
@@ -58,7 +73,7 @@ impl ConnectionThrottle {
 
         rec.count += 1;
 
-        if rec.count > MAX_CONNECTIONS_PER_IP {
+        if rec.count > self.max_per_ip {
             rec.banned_until = Some(now + TEMP_BAN_DURATION);
             tracing::warn!(
                 %ip,

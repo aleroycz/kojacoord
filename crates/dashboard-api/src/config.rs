@@ -51,7 +51,10 @@ fn default_pool() -> u32 {
     10
 }
 fn default_jwt_exp() -> u64 {
-    24
+    // Shorter-lived access tokens limit the window of misuse for a stolen token.
+    // (There is no server-side revocation; rotate `jwt.secret` to invalidate all
+    // outstanding tokens.)
+    8
 }
 
 /// Minimum acceptable length (in bytes) for the JWT signing secret.

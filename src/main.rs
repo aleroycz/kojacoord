@@ -44,9 +44,22 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("Failed to load config from {}", config_path))?
     } else {
         tracing::warn!("{} not found — writing default config", config_path);
-        std::fs::write(&config_path, kojacoord_config::DEFAULT_CONFIG)
-            .with_context(|| "Failed to write default config")?;
-        kojacoord_config::ProxyConfig::from_file(&config_path)?
+        // Start from defaults, then auto-generate strong secrets for any enabled
+        // control plane so the first run is secure-by-default (no `changeme`).
+        let mut cfg: kojacoord_config::ProxyConfig =
+            toml::from_str(kojacoord_config::DEFAULT_CONFIG)
+                .context("Failed to parse embedded default config")?;
+        if cfg.ensure_secrets() {
+            tracing::warn!(
+                "Generated strong random auth tokens for enabled control-plane services; \
+                 see {} for the values.",
+                config_path
+            );
+        }
+        save_config(&cfg, &config_path).context("Failed to write default config")?;
+        cfg.validate()
+            .context("Generated default config failed validation")?;
+        cfg
     };
 
     // Check EULA acceptance

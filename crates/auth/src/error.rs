@@ -25,6 +25,9 @@ pub enum AuthError {
 
     #[error("cipher initialization failed: {0}")]
     EncryptionSetupFailed(String),
+
+    #[error("invalid username")]
+    InvalidUsername,
 }
 
 impl AuthError {
@@ -33,6 +36,7 @@ impl AuthError {
             Self::SessionServerRejected => "Failed to verify username!",
             Self::RateLimited => "Authentication servers are busy. Please try again.",
             Self::SessionServerUnreachable(_) => "Could not reach authentication servers.",
+            Self::InvalidUsername => "Invalid username.",
             _ => "Authentication failed.",
         };
         serde_json::json!({"text": text, "color": "red"}).to_string()

@@ -21,7 +21,16 @@ struct ApiState {
 }
 
 pub async fn serve(proxy: Arc<ProxyState>, bind: String, token: String) -> anyhow::Result<()> {
-    let cors = tower_http::cors::CorsLayer::permissive();
+    // The dashboard UI is served same-origin from this listener, so no
+    // cross-origin access is required. Restrict to the methods/headers actually
+    // used and do NOT reflect arbitrary origins (was previously `permissive()`,
+    // which allowed any site to drive the token-authenticated API).
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ]);
 
     let dashboard_dir = "../../dashboard-ui/dist";
     let dashboard_service = ServeDir::new(dashboard_dir).fallback(
@@ -48,7 +57,7 @@ fn authorized(headers: &HeaderMap, token: &str) -> bool {
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t == token)
+        .map(|t| crate::services::constant_time_eq(t.as_bytes(), token.as_bytes()))
         .unwrap_or(false)
 }
 

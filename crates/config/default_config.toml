@@ -15,9 +15,17 @@ motd = "KojacoordNetwork"
 # server_lore = "Welcome to our server!"
 tab_list = "GLOBAL_PING"
 
+# Player-info forwarding to backends.
+#   none       - no forwarding (default; safest)
+#   velocity   - modern, HMAC-signed forwarding. REQUIRES a strong velocity_secret
+#                that matches the backend's forwarding.secret.
+#   bungeecord - legacy, UNSIGNED forwarding. Backends MUST be firewalled so they
+#                only accept connections from this proxy, otherwise players can
+#                spoof identities.
 [forwarding]
-mode = "bungeecord"
-velocity_secret = "changeme"
+mode = "none"
+# Generate with e.g. `openssl rand -hex 32` and copy it to the backend.
+velocity_secret = ""
 
 [anticheat]
 enabled = true
@@ -26,7 +34,10 @@ max_cps = 20
 store_violations = true
 
 [database]
-url = "mysql://root:password@localhost/kojacoord"
+# Leave empty to use a local SQLite file (data/proxy.db). For MySQL, supply the
+# URL via the KOJA_DATABASE__URL environment variable / a secret store rather
+# than committing credentials here, e.g. mysql://user:pass@host/kojacoord
+url = ""
 max_connections = 10
 
 [[servers]]

@@ -6,11 +6,16 @@ use crate::loader::PluginLoader;
 use crate::sandbox::{apply_sandbox, SandboxConfig};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+/// A loaded plugin shared across the proxy. The `Mutex` provides the interior
+/// mutability the `Plugin` trait requires (`handle_event`/`on_*` take `&mut self`)
+/// while still allowing the instance to be shared between tasks.
+pub type SharedPlugin = Arc<Mutex<Box<dyn Plugin>>>;
 
 pub struct PluginManager {
     loader: PluginLoader,
-    plugins: HashMap<String, (Arc<dyn Plugin>, PluginMetadata)>,
+    plugins: HashMap<String, (SharedPlugin, PluginMetadata)>,
     plugin_configs: HashMap<String, PluginContext>,
     packet_hooks: Arc<RwLock<Vec<PacketEvent>>>,
     sandbox_enabled: bool,
@@ -65,7 +70,7 @@ impl PluginManager {
             config,
         };
 
-        let (plugin, metadata) = self.loader.load_plugin(path, &context)?;
+        let (mut plugin, metadata) = self.loader.load_plugin(path, &context)?;
 
         if metadata.name != plugin_name {
             log::warn!(
@@ -75,8 +80,29 @@ impl PluginManager {
             );
         }
 
-        self.plugins
-            .insert(plugin_name.clone(), (plugin, metadata.clone()));
+        // Activate the plugin and collect its packet hooks now, while we still
+        // own the Box exclusively, so the hooks take effect in `process_packet`.
+        if let Err(e) = plugin.on_enable() {
+            log::warn!("Plugin '{}' on_enable failed: {}", metadata.name, e);
+        }
+        let hooks = plugin.register_packet_hooks();
+        if !hooks.is_empty() {
+            let count = hooks.len();
+            self.packet_hooks
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(hooks);
+            log::info!(
+                "Registered {} packet hook(s) from plugin '{}'",
+                count,
+                metadata.name
+            );
+        }
+
+        self.plugins.insert(
+            plugin_name.clone(),
+            (Arc::new(Mutex::new(plugin)), metadata.clone()),
+        );
         self.plugin_configs.insert(plugin_name.clone(), context);
 
         log::info!(
@@ -96,7 +122,10 @@ impl PluginManager {
         let dir = dir.as_ref();
 
         // Prevent path traversal attacks by rejecting paths containing '..'.
-        if dir.components().any(|c| c == std::path::Component::ParentDir) {
+        if dir
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
             return Err(anyhow::anyhow!("Invalid input: {}", dir.display()));
         }
 
@@ -131,7 +160,18 @@ impl PluginManager {
     }
 
     pub fn unload_plugin(&mut self, name: &str) -> anyhow::Result<PluginMetadata> {
-        if let Some((_plugin, metadata)) = self.plugins.remove(name) {
+        if let Some((plugin, metadata)) = self.plugins.remove(name) {
+            // Run lifecycle teardown before dropping the instance.
+            {
+                let mut guard = plugin.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(e) = guard.on_disable() {
+                    log::warn!("Plugin '{}' on_disable failed: {}", name, e);
+                }
+                if let Err(e) = guard.on_unload() {
+                    log::warn!("Plugin '{}' on_unload failed: {}", name, e);
+                }
+            }
+
             self.plugin_configs.remove(name);
 
             self.packet_hooks
@@ -152,11 +192,20 @@ impl PluginManager {
         self.loader.unload_all();
     }
 
+    /// Deliver an event to every loaded plugin's `handle_event` and collect the
+    /// non-`None` responses for the caller to act on. Each plugin is locked only
+    /// for the duration of its handler.
     pub fn broadcast_event(&self, event: &PluginEvent) -> Vec<PluginResponse> {
-        let responses = Vec::new();
+        let mut responses = Vec::new();
 
-        log::debug!("Broadcasting event {:?} to {} plugins (event handling disabled due to trait limitations)",
-                    event, self.plugins.len());
+        for (name, (plugin, _)) in &self.plugins {
+            let mut guard = plugin.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.handle_event(event) {
+                Ok(Some(response)) => responses.push(response),
+                Ok(None) => {},
+                Err(e) => log::error!("Plugin '{}' handle_event error: {}", name, e),
+            }
+        }
 
         responses
     }

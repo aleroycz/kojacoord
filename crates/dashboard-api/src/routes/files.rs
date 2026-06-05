@@ -134,13 +134,24 @@ pub async fn delete_file(
     Path(key): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     auth::require_admin(&auth.0)?;
+
+    // Constrain deletion to the managed uploads/ namespace and re-validate the
+    // remainder, mirroring the upload path. Without this an admin (or a stolen
+    // admin token) could delete arbitrary bucket objects, e.g. backups.
+    const UPLOADS_PREFIX: &str = "uploads/";
+    let rest = key
+        .strip_prefix(UPLOADS_PREFIX)
+        .ok_or_else(|| AppError::BadRequest("key must be under uploads/".into()))?;
+    let safe_name = sanitize_relative_key(rest)?;
+    let safe_key = format!("{}{}", UPLOADS_PREFIX, safe_name);
+
     state
         .s3
-        .delete(&key)
+        .delete(&safe_key)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    tracing::info!(key = %key, "file deleted");
-    Ok(Json(json!({"deleted": key})))
+    tracing::info!(key = %safe_key, by = %auth.0.sub, "file deleted");
+    Ok(Json(json!({"deleted": safe_key})))
 }
 
 pub async fn upload_server_files(

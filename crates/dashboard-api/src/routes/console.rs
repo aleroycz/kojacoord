@@ -1,18 +1,43 @@
 use axum::{
     extract::ws::{Message, WebSocket},
-    extract::{Path, State, WebSocketUpgrade},
-    response::Response,
+    extract::{Path, Query, State, WebSocketUpgrade},
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::routes::AppState;
+use crate::{auth, error::AppError, routes::AppState};
+
+#[derive(Deserialize)]
+pub struct ConsoleAuth {
+    /// JWT passed as a query parameter because browsers cannot set the
+    /// `Authorization` header on a WebSocket handshake.
+    pub token: Option<String>,
+}
 
 pub async fn console_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<i64>,
+    Query(q): Query<ConsoleAuth>,
 ) -> Response {
+    // Console access grants arbitrary command execution on the backend server,
+    // so it is gated to administrators. Authenticate BEFORE upgrading the
+    // socket; reject anonymous or under-privileged callers.
+    let token = match q.token.as_deref() {
+        Some(t) if !t.is_empty() => t,
+        _ => return AppError::Unauthorized.into_response(),
+    };
+    let claims = match auth::authorize(&state, token) {
+        Ok(c) => c,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = auth::require_admin(&claims) {
+        return e.into_response();
+    }
+
+    tracing::info!(server_id, admin = %claims.sub, "console session authorized");
     ws.on_upgrade(move |socket| handle_console_ws(socket, state, server_id))
 }
 

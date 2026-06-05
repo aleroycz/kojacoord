@@ -9,11 +9,19 @@ const MAX_FRAME: usize = 1 << 21;
 
 pub struct MinecraftFrameCodec {
     cipher: Option<super::cipher::CipherState>,
+    /// Number of leading bytes in the read buffer that have already been
+    /// decrypted. AES-CFB8 is a stateful stream cipher, so each ciphertext byte
+    /// must be decrypted exactly once; without this counter a frame split across
+    /// multiple reads would be decrypted twice and desynchronise the keystream.
+    decrypted: usize,
 }
 
 impl MinecraftFrameCodec {
     pub fn new() -> Self {
-        Self { cipher: None }
+        Self {
+            cipher: None,
+            decrypted: 0,
+        }
     }
 
     pub fn enable_cipher(&mut self, state: super::cipher::CipherState) {
@@ -32,8 +40,13 @@ impl Decoder for MinecraftFrameCodec {
     type Error = std::io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // Decrypt only the bytes that have arrived since the last call so each
+        // ciphertext byte passes through the CFB8 keystream exactly once.
         if let Some(cipher) = &mut self.cipher {
-            cipher.decrypt(src.as_mut());
+            if self.decrypted < src.len() {
+                cipher.decrypt(&mut src.as_mut()[self.decrypted..]);
+                self.decrypted = src.len();
+            }
         }
 
         let mut peek = Bytes::copy_from_slice(src.as_ref());
@@ -56,8 +69,13 @@ impl Decoder for MinecraftFrameCodec {
             return Ok(None);
         }
 
+        let consumed = header_len + payload_len;
         src.advance(header_len);
-        Ok(Some(src.split_to(payload_len).freeze()))
+        let frame = src.split_to(payload_len).freeze();
+        // The bytes we just consumed were already counted as decrypted; keep the
+        // counter aligned with the remaining (already-decrypted) buffer contents.
+        self.decrypted = self.decrypted.saturating_sub(consumed);
+        Ok(Some(frame))
     }
 }
 

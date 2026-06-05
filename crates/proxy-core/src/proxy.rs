@@ -14,9 +14,10 @@ use kojacoord_auth::{AuthConfig, AuthPipelineConfig};
 use kojacoord_cluster::{ClusterCoordinator, ServiceDiscovery};
 use kojacoord_config::ProxyConfig;
 use kojacoord_metrics::{AnalyticsEngine, MetricsCollector, MetricsExporter};
-use kojacoord_plugin_system::PluginManager;
+use kojacoord_plugin_system::{PluginEvent, PluginManager, PluginResponse};
 
 use crate::buffer_pool::BufferPool;
+use crate::connection_throttle::ConnectionThrottle;
 use crate::metrics::ProxyMetrics;
 use crate::routing::RoutingRules;
 use crate::server::ServerRegistry;
@@ -93,6 +94,8 @@ pub struct ProxyState {
     pub plugin_manager: Arc<PluginManager>,
 
     pub tps_tracker: Arc<TpsTracker>,
+
+    pub connection_throttle: Arc<ConnectionThrottle>,
 }
 
 impl ProxyState {
@@ -246,6 +249,10 @@ impl ProxyState {
 
         let tps_tracker = Arc::new(TpsTracker::new());
 
+        let connection_throttle = Arc::new(ConnectionThrottle::with_max_per_ip(
+            config.proxy.max_connections_per_ip,
+        ));
+
         if config.metrics.enabled {
             let exporter = MetricsExporter::new(Arc::clone(&metrics_collector));
             let bind = config.metrics.bind.clone();
@@ -279,6 +286,7 @@ impl ProxyState {
             analytics,
             plugin_manager,
             tps_tracker,
+            connection_throttle,
         })
     }
 
@@ -302,6 +310,64 @@ impl ProxyState {
             let pkt = crate::packet_builder::build_disconnect_packet(reason_json, proto);
             self.send_to_player(uuid, pkt);
         }
+    }
+
+    /// Send a system chat message to a single player by UUID.
+    pub async fn send_system_message_to(&self, uuid: &Uuid, text: &str) {
+        let proto = {
+            let sessions = self.sessions.read().await;
+            match sessions.get(uuid) {
+                Some(s) => s.try_read().map(|s| s.protocol_version).ok(),
+                None => None,
+            }
+        };
+        if let Some(proto) = proto {
+            let raw = crate::packet_builder::build_system_message_packet(text, proto);
+            self.send_to_player(uuid, raw);
+        }
+    }
+
+    /// Deliver a [`PluginEvent`] to all loaded plugins and act on their
+    /// responses (broadcast / direct message / kick). Returns `true` if the
+    /// event's subject player was kicked by a plugin, so the caller can stop
+    /// processing that connection.
+    pub async fn dispatch_plugin_event(&self, event: PluginEvent) -> bool {
+        let subject = match &event {
+            PluginEvent::PlayerJoin { uuid, .. }
+            | PluginEvent::PlayerChat { uuid, .. }
+            | PluginEvent::PlayerLeave { uuid }
+            | PluginEvent::PlayerMove { uuid, .. } => Some(*uuid),
+            _ => None,
+        };
+
+        // broadcast_event locks each plugin only for the duration of its
+        // handler and returns owned responses, so no plugin lock is held across
+        // the awaits below.
+        let responses = self.plugin_manager.broadcast_event(&event);
+
+        let mut subject_kicked = false;
+        for response in responses {
+            match response {
+                PluginResponse::None => {},
+                PluginResponse::Message(msg) => {
+                    if let Some(uuid) = subject {
+                        self.send_system_message_to(&uuid, &msg).await;
+                    }
+                },
+                PluginResponse::Broadcast(msg) => self.broadcast_system_message(&msg).await,
+                PluginResponse::KickPlayer { uuid, reason } => {
+                    let json = serde_json::json!({ "text": reason, "color": "red" }).to_string();
+                    self.kick_player(&uuid, &json).await;
+                    if Some(uuid) == subject {
+                        subject_kicked = true;
+                    }
+                },
+                PluginResponse::Custom(value) => {
+                    tracing::debug!(?value, "plugin returned a custom response");
+                },
+            }
+        }
+        subject_kicked
     }
 
     pub async fn broadcast_system_message(&self, text: &str) {
@@ -349,6 +415,19 @@ pub async fn accept_loop(state: Arc<ProxyState>) -> Result<(), anyhow::Error> {
         });
     }
 
+    // Periodically evict stale per-IP throttle records so the map cannot grow
+    // unbounded (e.g. from a wide IPv6 source range).
+    tokio::spawn({
+        let throttle = Arc::clone(&state.connection_throttle);
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                throttle.evict_stale().await;
+            }
+        }
+    });
+
     tokio::spawn({
         let metrics = Arc::clone(&state.metrics);
         async move {
@@ -372,6 +451,15 @@ pub async fn accept_loop(state: Arc<ProxyState>) -> Result<(), anyhow::Error> {
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let peer = peer_addr.to_string();
+
+        // Connection-flood protection: reject (and temp-ban) IPs opening
+        // connections faster than the configured per-IP rate before doing any
+        // per-connection work.
+        if let Err(reason) = state.connection_throttle.check(peer_addr.ip()).await {
+            tracing::debug!(peer = %peer, reason, "throttled connection rejected");
+            drop(stream);
+            continue;
+        }
 
         tracing::info!("New connection from {}", peer);
 
