@@ -33,7 +33,7 @@ pub async fn handle_command(
         "alert" => handle_alert(parts, session, send_message).await,
         "find" => handle_find(parts, state, send_message).await,
         "koja" | "kojacoord" => handle_koja(session, send_message).await,
-        "plugins" => handle_plugins(state, send_message).await,
+        "gplugins" => handle_plugins(state, send_message).await,
         "gtps" => handle_gtps(state, send_message).await,
         _ => CommandResult::NotACommand,
     }
@@ -347,6 +347,8 @@ fn is_proxy_command(input: &str) -> bool {
             | "find"
             | "koja"
             | "kojacoord"
+            | "gplugins"
+            | "gtps"
     )
 }
 
@@ -372,7 +374,7 @@ mod tests {
         assert!(is_proxy_command("glist"));
         assert!(is_proxy_command("hub"));
         assert!(is_proxy_command("KOJA"));
-        assert!(is_proxy_command("plugins"));
+        assert!(is_proxy_command("gplugins"));
         assert!(is_proxy_command("gtps"));
         assert!(!is_proxy_command("gamemode creative"));
         assert!(!is_proxy_command("tp Player2"));
