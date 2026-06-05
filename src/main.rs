@@ -110,6 +110,9 @@ fn save_config(config: &kojacoord_config::ProxyConfig, path: &str) -> anyhow::Re
 #[cfg(unix)]
 #[allow(dead_code)]
 fn is_running_as_elevated() -> bool {
+    // SAFETY: `getuid` is a thread-safe, always-succeeding POSIX syscall that
+    // takes no arguments and only reads the calling process's real user ID.
+    // It has no preconditions and cannot fail or cause UB.
     unsafe { libc::getuid() == 0 }
 }
 
@@ -120,6 +123,10 @@ fn is_running_as_elevated() -> bool {
     use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_QUERY};
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+    // SAFETY: All Win32 calls below receive valid, locally-owned pointers and
+    // correctly-sized buffers. `token` is a stack HANDLE we own; `elevation`
+    // and `size` are stack locals whose sizes match the TokenElevation query.
+    // No raw pointer outlives this block and every call's result is checked.
     unsafe {
         let mut token = HANDLE::default();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_ok() {

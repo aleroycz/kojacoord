@@ -96,10 +96,11 @@ async fn handle_ban(
         return CommandResult::Handled;
     }
 
-    let kick_json = format!(
-        r#"{{"text":"You have been banned: {}","color":"red"}}"#,
-        reason.replace('"', "'")
-    );
+    let kick_json = serde_json::json!({
+        "text": format!("You have been banned: {}", reason),
+        "color": "red"
+    })
+    .to_string();
     state.kick_player(&uuid, &kick_json).await;
 
     send_message(format!("§aBanned §f{}§a — {}", target_name, reason));

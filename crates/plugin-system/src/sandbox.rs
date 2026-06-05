@@ -12,7 +12,8 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             allow_filesystem: false,
-            allow_network: true,
+            // Deny by default: a plugin must be explicitly granted network access.
+            allow_network: false,
             allow_process_spawn: false,
             restricted_paths: vec![
                 "/etc".to_string(),
@@ -50,6 +51,9 @@ fn apply_linux_sandbox(config: &SandboxConfig) -> Result<()> {
     use std::fs;
 
     if !config.allow_filesystem {
+        // SAFETY: `setrlimit` reads a fully-initialised `rlimit` struct through a
+        // valid shared reference for the duration of the call. The resource id is
+        // a libc constant and the return value is checked; no UB is possible.
         unsafe {
             let rlim = libc::rlimit {
                 rlim_cur: 64,
@@ -63,6 +67,8 @@ fn apply_linux_sandbox(config: &SandboxConfig) -> Result<()> {
             }
         }
 
+        // SAFETY: identical contract to the RLIMIT_NOFILE call above — a valid,
+        // initialised `rlimit` passed by shared reference to a checked syscall.
         unsafe {
             let rlim = libc::rlimit {
                 rlim_cur: 0,
@@ -87,6 +93,9 @@ fn apply_linux_sandbox(config: &SandboxConfig) -> Result<()> {
         }
     }
 
+    // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS, ...)` only takes scalar arguments and
+    // sets a per-thread flag. It has no pointer operands and cannot cause UB;
+    // the return value is checked.
     unsafe {
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
             warn!(
@@ -112,6 +121,8 @@ fn apply_macos_sandbox(config: &SandboxConfig) -> Result<()> {
     if !config.allow_filesystem {
         warn!("Filesystem access restricted - macOS sandbox requires proper entitlements");
 
+        // SAFETY: `setrlimit` reads a fully-initialised `rlimit` through a valid
+        // shared reference for the call's duration; the return value is checked.
         unsafe {
             let rlim = libc::rlimit {
                 rlim_cur: 64,

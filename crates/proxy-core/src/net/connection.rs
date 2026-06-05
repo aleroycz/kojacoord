@@ -586,10 +586,11 @@ impl ClientConnection {
         // never blocks a legitimate login.
         if let Some(db) = &self.state.db {
             if let Ok(Some(ban)) = db.active_ban(uuid).await {
-                let reason = format!(
-                    r#"{{"text":"You are banned: {}","color":"red"}}"#,
-                    ban.reason.replace('"', "'")
-                );
+                let reason = serde_json::json!({
+                    "text": format!("You are banned: {}", ban.reason),
+                    "color": "red"
+                })
+                .to_string();
                 let _ = self.send_disconnect_login(&reason).await;
                 tracing::debug!(username = %username, reason = %ban.reason, "rejected banned player");
                 return Err(ConnectionError::Auth(format!("banned: {}", ban.reason)));

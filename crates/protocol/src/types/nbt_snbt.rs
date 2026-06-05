@@ -280,7 +280,7 @@ impl SnbtParser {
     }
 
     fn parse_quoted_string(&mut self) -> Result<String, SnbtError> {
-        let quote = self.current().unwrap();
+        let quote = self.current().ok_or(SnbtError::UnexpectedEof)?;
         self.advance();
 
         let mut result = String::new();
@@ -344,8 +344,8 @@ impl SnbtParser {
         let mut num_str = String::new();
         let mut has_dot = false;
 
-        if let Some('+') | Some('-') = self.current() {
-            num_str.push(self.current().unwrap());
+        if let Some(sign @ ('+' | '-')) = self.current() {
+            num_str.push(sign);
             self.advance();
         }
 

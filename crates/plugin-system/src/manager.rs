@@ -129,7 +129,10 @@ impl PluginManager {
         if let Some((_plugin, metadata)) = self.plugins.remove(name) {
             self.plugin_configs.remove(name);
 
-            self.packet_hooks.write().unwrap().clear();
+            self.packet_hooks
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
 
             log::info!("Unloaded plugin: {}", name);
             return Ok(metadata);
@@ -154,7 +157,7 @@ impl PluginManager {
     }
 
     pub fn process_packet(&self, packet: &PacketData) -> PacketHookResult {
-        let hooks = self.packet_hooks.read().unwrap();
+        let hooks = self.packet_hooks.read().unwrap_or_else(|e| e.into_inner());
 
         for hook in hooks.iter() {
             if hook.matches(packet) {
@@ -196,7 +199,7 @@ impl PluginManager {
     }
 
     pub fn get_packet_hooks(&self) -> Vec<HookInfo> {
-        let hooks = self.packet_hooks.read().unwrap();
+        let hooks = self.packet_hooks.read().unwrap_or_else(|e| e.into_inner());
         hooks
             .iter()
             .map(|hook| HookInfo {

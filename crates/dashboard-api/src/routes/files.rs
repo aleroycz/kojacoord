@@ -18,6 +18,49 @@ pub struct FileQuery {
     pub prefix: Option<String>,
 }
 
+/// Sanitise a user-supplied S3 object name into a safe relative key.
+///
+/// Rejects path traversal (`..`), absolute/UNC/drive paths, backslashes, NUL
+/// bytes, and any characters outside a conservative whitelist. Returns a
+/// normalised forward-slash relative path with no leading slash.
+fn sanitize_relative_key(input: &str) -> Result<String, AppError> {
+    let trimmed = input.trim().trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("empty file name".into()));
+    }
+    if trimmed.contains('\\') || trimmed.contains('\0') || trimmed.contains(':') {
+        return Err(AppError::BadRequest(
+            "file name contains invalid path characters".into(),
+        ));
+    }
+
+    let mut parts = Vec::new();
+    for seg in trimmed.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return Err(AppError::BadRequest(
+                "path traversal is not allowed in file names".into(),
+            ));
+        }
+        if !seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+        {
+            return Err(AppError::BadRequest(
+                "file name contains disallowed characters".into(),
+            ));
+        }
+        parts.push(seg);
+    }
+
+    if parts.is_empty() {
+        return Err(AppError::BadRequest("invalid file name".into()));
+    }
+    Ok(parts.join("/"))
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ServerTemplateJson {
     pub name: String,
@@ -66,16 +109,20 @@ pub async fn upload_file(
         .map_err(|e| AppError::BadRequest(e.to_string()))?
     {
         let name = field.name().unwrap_or("file").to_owned();
+        // Enforce a fixed prefix and reject traversal/absolute paths so an
+        // admin cannot write to arbitrary S3 keys.
+        let safe_name = sanitize_relative_key(&name)?;
+        let key = format!("uploads/{}", safe_name);
         let data = field
             .bytes()
             .await
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
         state
             .s3
-            .upload_bytes(&name, data.to_vec())
+            .upload_bytes(&key, data.to_vec())
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        tracing::info!(key = %name, bytes = data.len(), "file uploaded");
+        tracing::info!(key = %key, bytes = data.len(), "file uploaded");
     }
 
     Ok(Json(json!({"status": "uploaded"})))
@@ -129,11 +176,9 @@ pub async fn upload_server_files(
             );
             tracing::info!("Parsed template.json");
         } else {
-            let file_key = if let Some(fname) = filename {
-                format!("{}/{}", server_prefix, fname)
-            } else {
-                format!("{}/{}", server_prefix, name)
-            };
+            let raw_name = filename.as_deref().unwrap_or(&name);
+            let safe_name = sanitize_relative_key(raw_name)?;
+            let file_key = format!("{}/{}", server_prefix, safe_name);
             server_files.insert(file_key, data.to_vec());
         }
     }

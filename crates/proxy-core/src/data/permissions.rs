@@ -14,8 +14,37 @@ pub struct Role {
 
 impl Role {
     pub fn has_permission(&self, node: &str) -> bool {
-        self.permissions.iter().any(|p| p == "*" || p == node)
+        for p in &self.permissions {
+            if permission_matches(p, node) {
+                if p == "*" {
+                    tracing::debug!(role = %self.name, node, "granted via global '*' wildcard permission");
+                }
+                return true;
+            }
+        }
+        false
     }
+}
+
+/// Match a permission `pattern` against a requested `node`.
+///
+/// Supports:
+/// - exact match (`command.ban` == `command.ban`)
+/// - global wildcard (`*` matches everything)
+/// - hierarchical wildcard (`command.*` matches `command.ban` and
+///   `command.sub.node`, but NOT `admin.reload`)
+fn permission_matches(pattern: &str, node: &str) -> bool {
+    if pattern == "*" || pattern == node {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix(".*") {
+        // `command.*` matches `command.ban`, `command.x.y`, but not `command`
+        // itself nor unrelated roots like `admin.*`.
+        return node
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('.'));
+    }
+    false
 }
 
 #[derive(Debug, Clone, Default)]
@@ -163,5 +192,21 @@ mod tests {
     fn case_insensitive_lookup() {
         let r = registry();
         assert!(r.get("admin").is_some());
+    }
+
+    #[test]
+    fn hierarchical_wildcard_matching() {
+        // command.* matches command.ban but not admin.reload
+        assert!(permission_matches("command.*", "command.ban"));
+        assert!(permission_matches("command.*", "command.sub.node"));
+        assert!(!permission_matches("command.*", "admin.reload"));
+        // a prefixed wildcard must not match the bare prefix
+        assert!(!permission_matches("command.*", "command"));
+        // partial-name collision must not match (commandx vs command.*)
+        assert!(!permission_matches("command.*", "commandx.ban"));
+        // exact and global
+        assert!(permission_matches("command.ban", "command.ban"));
+        assert!(permission_matches("*", "anything.at.all"));
+        assert!(!permission_matches("command.ban", "command.kick"));
     }
 }

@@ -105,10 +105,11 @@ pub async fn kick_player(
         .await?;
 
     if let Ok(target) = uuid::Uuid::parse_str(&uuid) {
-        let kick_json = format!(
-            r#"{{"text":"You were kicked: {}","color":"red"}}"#,
-            body.reason.replace('"', "'")
-        );
+        let kick_json = json!({
+            "text": format!("You were kicked: {}", body.reason),
+            "color": "red"
+        })
+        .to_string();
         state.proxy.kick_player(&target, &kick_json).await;
     }
 
@@ -146,10 +147,11 @@ pub async fn ban_player(
         .await;
 
     if let Ok(target) = uuid::Uuid::parse_str(&uuid) {
-        let kick_json = format!(
-            r#"{{"text":"You have been banned: {}","color":"red"}}"#,
-            body.reason.replace('"', "'")
-        );
+        let kick_json = json!({
+            "text": format!("You have been banned: {}", body.reason),
+            "color": "red"
+        })
+        .to_string();
         state.proxy.kick_player(&target, &kick_json).await;
     }
 

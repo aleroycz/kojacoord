@@ -27,7 +27,6 @@ pub struct CreateTemplateBody {
     pub modrinth_version_id: Option<String>,
     pub curseforge_project_id: Option<u32>,
     pub curseforge_file_id: Option<u32>,
-    pub curseforge_api_key: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -176,9 +175,19 @@ pub async fn download_modpack(
             Some("curseforge") => {
                 let project_id = body.curseforge_project_id.unwrap_or(0);
                 let file_id = body.curseforge_file_id.unwrap_or(0);
-                let api_key = body.curseforge_api_key.as_deref().unwrap_or("");
+                // The CurseForge API key is a server-side secret and must never
+                // be accepted from client requests. Source it from the env.
+                let api_key = match std::env::var("CURSEFORGE_API_KEY") {
+                    Ok(key) if !key.trim().is_empty() => key,
+                    _ => {
+                        tracing::error!(
+                            "CURSEFORGE_API_KEY is not configured; cannot download CurseForge modpack"
+                        );
+                        return;
+                    },
+                };
                 downloader
-                    .download_curseforge(&body.name, project_id, file_id, api_key)
+                    .download_curseforge(&body.name, project_id, file_id, &api_key)
                     .await
             },
             _ => {
