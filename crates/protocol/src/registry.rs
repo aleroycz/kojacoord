@@ -42,7 +42,14 @@ impl PacketRegistry {
     ) {
         let state_map = self.map.entry(state).or_default();
         let dir_vec = state_map.entry(dir).or_default();
-        dir_vec.push((proto, PacketMeta { id, name }));
+        if let Some((_, meta)) = dir_vec
+            .iter_mut()
+            .find(|(p, meta)| *p == proto && meta.name == name)
+        {
+            meta.id = id;
+        } else {
+            dir_vec.push((proto, PacketMeta { id, name }));
+        }
     }
 
     pub fn get_id(
