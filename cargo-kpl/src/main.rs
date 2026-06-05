@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -207,12 +208,14 @@ fn find_library(dir: &PathBuf, name: &str) -> Result<PathBuf> {
     for entry in WalkDir::new(dir).max_depth(2) {
         let entry = entry?;
         if entry.file_type().is_file() {
-            let file_name = entry.file_name();
+            let Some(file_name) = entry.file_name().to_str() else {
+                continue;
+            };
             for ext in &extensions {
-                if file_name.starts_with(&format!("lib{}", name)) || file_name.starts_with(name) {
-                    if file_name.ends_with(ext) {
-                        return Ok(entry.path().to_path_buf());
-                    }
+                if (file_name.starts_with(&format!("lib{}", name)) || file_name.starts_with(name))
+                    && file_name.ends_with(ext)
+                {
+                    return Ok(entry.path().to_path_buf());
                 }
             }
         }
@@ -234,7 +237,7 @@ struct Package {
     description: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PluginMetadata {
     name: String,
     version: String,

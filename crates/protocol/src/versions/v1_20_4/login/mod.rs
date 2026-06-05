@@ -440,7 +440,7 @@ mod tests {
         p.encode(&mut buf).unwrap();
         let d = ClientboundLoginSuccess::decode(&mut buf.freeze()).unwrap();
         assert_eq!(d.uuid, p.uuid);
-        assert_eq!(d.strict_error_handling, true);
+        assert!(d.strict_error_handling);
         assert_eq!(d.properties.len(), 1);
     }
 

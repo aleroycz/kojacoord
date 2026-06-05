@@ -1236,7 +1236,7 @@ mod tests {
     #[test]
     fn move_pos_roundtrip() {
         let p = ServerboundMovePlayerPos {
-            x: 3.14,
+            x: 3.5,
             feet_y: 64.0,
             z: 2.71,
             on_ground: true,
