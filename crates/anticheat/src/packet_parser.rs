@@ -205,16 +205,15 @@ fn parse_dig(cursor: &mut Bytes, ver: ProtocolVersion) -> AnticheatPacket {
         _ => VarInt::decode(cursor).map(|v| v.0 as u8).unwrap_or(0xFF),
     };
 
-    let packed = i64::decode(cursor).unwrap_or(0);
-
     let (bx, by, bz) = if matches!(ver, ProtocolVersion::V1_7_10 | ProtocolVersion::V1_8) {
-        // 1.7/1.8 packed as: high i32 = X, byte = Y, low i32 = Z
-        let bx = (packed >> 32) as i32;
-        let by = ((packed >> 16) & 0xFF) as i32;
-        let bz = (packed & 0xFFFF) as i32;
+        // 1.7/1.8 separate fields: x(i32) + y(u8) + z(i32)
+        let bx = i32::decode(cursor).unwrap_or(0);
+        let by = u8::decode(cursor).unwrap_or(0) as i32;
+        let bz = i32::decode(cursor).unwrap_or(0);
         (bx, by, bz)
     } else {
         // 1.9+: 64-bit packed block position  X[26] Z[26] Y[12]
+        let packed = i64::decode(cursor).unwrap_or(0);
         let bx = (packed >> 38) as i32;
         let by = ((packed << 52) >> 52) as i32;
         let bz = ((packed << 26) >> 38) as i32;
