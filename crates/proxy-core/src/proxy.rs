@@ -325,22 +325,52 @@ impl ProxyState {
         let mut new_names = std::collections::HashSet::new();
         for s in &new_config.servers {
             new_names.insert(s.name.clone());
-            if self.server_registry.get(&s.name).is_none() {
-                if let Ok(addr) = s.address.parse() {
+            let addr = match s.address.parse::<std::net::SocketAddr>() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(name = %s.name, address = %s.address, error = %e, "Invalid server address in config, skipping");
+                    continue;
+                }
+            };
+
+            if let Some(existing) = self.server_registry.get(&s.name) {
+                let needs_update = existing.address != addr
+                    || existing.restricted != s.restricted
+                    || existing.forwarding_override != s.forwarding_override
+                    || existing.backend_type != s.backend_type;
+
+                if needs_update {
+                    let old_player_count = existing.player_count.load(std::sync::atomic::Ordering::Relaxed);
+                    let old_online = existing.online.load(std::sync::atomic::Ordering::Relaxed);
+
                     self.server_registry
                         .register(crate::server::BackendServer {
                             name: s.name.clone(),
                             address: addr,
                             restricted: s.restricted,
                             forwarding_override: s.forwarding_override.clone(),
-                            player_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                            online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                            player_count: Arc::new(std::sync::atomic::AtomicUsize::new(old_player_count)),
+                            online: Arc::new(std::sync::atomic::AtomicBool::new(old_online)),
                             connection_pool: None,
                             backend_type: s.backend_type.clone(),
                         })
                         .await;
-                    tracing::info!("Hot-reloaded new server: {}", s.name);
+                    tracing::info!("Hot-reloaded (updated) server: {}", s.name);
                 }
+            } else {
+                self.server_registry
+                    .register(crate::server::BackendServer {
+                        name: s.name.clone(),
+                        address: addr,
+                        restricted: s.restricted,
+                        forwarding_override: s.forwarding_override.clone(),
+                        player_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                        online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        connection_pool: None,
+                        backend_type: s.backend_type.clone(),
+                    })
+                    .await;
+                tracing::info!("Hot-reloaded new server: {}", s.name);
             }
         }
 

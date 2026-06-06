@@ -418,11 +418,12 @@ impl Db {
         username: &str,
         product_slug: &str,
     ) -> Result<i64, sqlx::Error> {
+        let username_normalized = username.to_lowercase();
         let id = match self.db_type {
             DbType::MySql => {
                 if let Some(pool) = &self.mysql_pool {
                     let result = sqlx::query("INSERT INTO pending_purchases (username, product_slug, delivered) VALUES (?, ?, 0)")
-                        .bind(username)
+                        .bind(&username_normalized)
                         .bind(product_slug)
                         .execute(pool)
                         .await?;
@@ -434,7 +435,7 @@ impl Db {
             DbType::Sqlite => {
                 if let Some(pool) = &self.sqlite_pool {
                     let result = sqlx::query("INSERT INTO pending_purchases (username, product_slug, delivered) VALUES (?, ?, 0)")
-                        .bind(username)
+                        .bind(&username_normalized)
                         .bind(product_slug)
                         .execute(pool)
                         .await?;
@@ -451,12 +452,13 @@ impl Db {
         &self,
         username: &str,
     ) -> Result<Vec<PendingPurchase>, sqlx::Error> {
+        let username_normalized = username.to_lowercase();
         let mut list = Vec::new();
         match self.db_type {
             DbType::MySql => {
                 if let Some(pool) = &self.mysql_pool {
                     let rows = sqlx::query("SELECT id, username, product_slug, delivered FROM pending_purchases WHERE username = ? AND delivered = 0")
-                        .bind(username)
+                        .bind(&username_normalized)
                         .fetch_all(pool)
                         .await?;
                     for r in rows {
@@ -472,7 +474,7 @@ impl Db {
             DbType::Sqlite => {
                 if let Some(pool) = &self.sqlite_pool {
                     let rows = sqlx::query("SELECT id, username, product_slug, delivered FROM pending_purchases WHERE username = ? AND delivered = 0")
-                        .bind(username)
+                        .bind(&username_normalized)
                         .fetch_all(pool)
                         .await?;
                     for r in rows {

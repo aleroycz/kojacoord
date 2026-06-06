@@ -133,10 +133,10 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        if let Err(e) = watcher.watch(
-            std::path::Path::new(&watcher_path),
-            RecursiveMode::NonRecursive,
-        ) {
+        let config_path_buf = std::path::PathBuf::from(&watcher_path);
+        let parent_dir = config_path_buf.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+        if let Err(e) = watcher.watch(parent_dir, RecursiveMode::NonRecursive) {
             tracing::error!(error = %e, path = %watcher_path, "Failed to register file watch");
             return;
         }
@@ -144,7 +144,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(path = %watcher_path, "Config file watcher active");
 
         for event in rx {
-            if matches!(event.kind, EventKind::Modify(_)) {
+            let target_modified = event.paths.iter().any(|p| {
+                p.file_name() == config_path_buf.file_name()
+            });
+
+            if target_modified && matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 match kojacoord_config::ProxyConfig::from_file(&watcher_path) {
                     Ok(new_cfg) => {
