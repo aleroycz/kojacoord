@@ -307,7 +307,7 @@ fn default_telemetry_endpoint() -> String {
 
 fn default_telemetry_interval() -> u64 {
     // Every 30 minutes is plenty for adoption metrics and is gentle on the endpoint.
-    60
+    1800
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
