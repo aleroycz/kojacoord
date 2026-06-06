@@ -302,10 +302,10 @@ async fn handle_gtps(
 ) -> CommandResult {
     send_message("§6§lServer TPS (Ticks Per Second)".to_owned());
 
-    let tps_5s = state.tps_tracker.calculate_tps(5).await;
-    let tps_10s = state.tps_tracker.calculate_tps(10).await;
-    let tps_20s = state.tps_tracker.calculate_tps(20).await;
-    let tps_30s = state.tps_tracker.calculate_tps(30).await;
+    let tps_5s = state.tps_tracker.calculate_tps(5);
+    let tps_10s = state.tps_tracker.calculate_tps(10);
+    let tps_20s = state.tps_tracker.calculate_tps(20);
+    let tps_30s = state.tps_tracker.calculate_tps(30);
 
     let color_tps = |tps: f64| -> &'static str {
         if tps < 15.0 {

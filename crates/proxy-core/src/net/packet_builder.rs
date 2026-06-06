@@ -227,9 +227,9 @@ pub fn build_block_update_packet(x: i32, y: i32, z: i32, block_state_id: u32, pr
             // 1.7: packet 0x23 — Block Change
             // Fields: x(i32) y(u8) z(i32) block_type(VarInt) block_metadata(u8)
             VarInt(0x23_i32).encode(&mut payload).unwrap();
-            (x as i32).encode(&mut payload).unwrap();
+            x.encode(&mut payload).unwrap();
             (y as u8).encode(&mut payload).unwrap();
-            (z as i32).encode(&mut payload).unwrap();
+            z.encode(&mut payload).unwrap();
             // block_state_id encodes as type<<4|meta; pass as-is capped at VarInt
             VarInt(block_state_id as i32).encode(&mut payload).unwrap();
             0u8.encode(&mut payload).unwrap(); // metadata

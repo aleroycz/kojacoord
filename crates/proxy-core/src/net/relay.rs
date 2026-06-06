@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use kojacoord_protocol::{
     codec::Encode,
-    registry::{Direction, PacketRegistry, ProtocolState},
     types::VarInt,
     Decode,
 };
@@ -222,7 +221,7 @@ impl PacketRelay {
 
                 state_s2c.metrics.record_packet(payload.len());
 
-                state_s2c.tps_tracker.record_packet().await;
+                state_s2c.tps_tracker.record_packet();
 
                 let mut cur = payload.clone();
 
@@ -235,19 +234,12 @@ impl PacketRelay {
                     }
                 };
 
-                let registry = PacketRegistry::default();
-                let pkt_name = registry.get_name_from_id(proto, ProtocolState::Play, Direction::Clientbound, pkt_id)
-                    .unwrap_or("Unknown");
-                let session = session_s2c.read().await;
-                tracing::debug!(
+                tracing::trace!(
                     direction = "S→C",
                     packet_id = pkt_id,
-                    packet_name = pkt_name,
                     protocol = proto,
-                    player = %session.username,
                     "packet"
                 );
-                drop(session);
 
                 // ─── BlockUpdate intercept (S→C) ──────────────────────────
                 // When the server reveals what a block actually is at a
@@ -450,25 +442,12 @@ impl PacketRelay {
                         },
                     };
 
-                    let registry = PacketRegistry::default();
-                    let pkt_name = registry
-                        .get_name_from_id(
-                            proto,
-                            ProtocolState::Play,
-                            Direction::Serverbound,
-                            pkt_id,
-                        )
-                        .unwrap_or("Unknown");
-                    let session = session_c2s.read().await;
-                    tracing::debug!(
+                    tracing::trace!(
                         direction = "C→S",
                         packet_id = pkt_id,
-                        packet_name = pkt_name,
                         protocol = proto,
-                        player = %session.username,
                         "packet"
                     );
-                    drop(session);
 
                     state_c2s.metrics.record_packet(payload.len());
 

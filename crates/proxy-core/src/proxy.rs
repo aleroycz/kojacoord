@@ -1,9 +1,9 @@
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
 use crate::permissions::RoleRegistry;
@@ -23,31 +23,71 @@ use crate::server::ServerRegistry;
 use crate::server_management::ServerManagementServer;
 use crate::session::SharedSession;
 
-#[derive(Clone)]
+/// Lock-free TPS tracker using a fixed-size ring buffer of atomic timestamps.
+///
+/// The old design used `RwLock<Vec<Instant>>` with a write lock on every packet,
+/// followed by a linear retain(). This caused severe contention in the relay hot
+/// path — the root cause of the TPS degradation reported in production.
+///
+/// This replacement uses a ring buffer of `AtomicU64` slots holding microsecond
+/// offsets from a fixed epoch. `record_packet()` is a single `fetch_add` + store
+/// — zero locks, zero allocations, O(1). `calculate_tps()` does a lock-free scan
+/// of the ring and counts entries within the requested window.
 pub struct TpsTracker {
-    packet_timestamps: Arc<RwLock<Vec<Instant>>>,
+    /// Ring buffer of timestamps as microsecond offsets from `epoch`.
+    slots: Box<[std::sync::atomic::AtomicU64]>,
+    /// Write cursor — monotonically increasing, modulo `slots.len()`.
+    cursor: std::sync::atomic::AtomicUsize,
+    /// Fixed reference point for converting `Instant` → u64.
+    epoch: Instant,
 }
+
+/// Sentinel value meaning "slot is empty / not yet written".
+const EMPTY_SLOT: u64 = 0;
+
+/// Ring buffer capacity. 32768 slots ≈ enough for 30s at 1000 pkt/s.
+const RING_SIZE: usize = 32768;
 
 impl TpsTracker {
     pub fn new() -> Self {
+        let slots: Vec<std::sync::atomic::AtomicU64> = (0..RING_SIZE)
+            .map(|_| std::sync::atomic::AtomicU64::new(EMPTY_SLOT))
+            .collect();
         Self {
-            packet_timestamps: Arc::new(RwLock::new(Vec::new())),
+            slots: slots.into_boxed_slice(),
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+            epoch: Instant::now(),
         }
     }
 
-    pub async fn record_packet(&self) {
-        let mut timestamps = self.packet_timestamps.write().await;
-        timestamps.push(Instant::now());
-
-        let cutoff = Instant::now() - Duration::from_secs(30);
-        timestamps.retain(|&t| t > cutoff);
+    /// Record a packet arrival. This is called on EVERY S→C packet in the relay
+    /// hot path, so it must be as cheap as possible — one atomic add, one atomic
+    /// store, no locks, no allocations.
+    #[inline]
+    pub fn record_packet(&self) {
+        let idx = self.cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % RING_SIZE;
+        let micros = self.epoch.elapsed().as_micros() as u64;
+        // Avoid writing the sentinel value (extremely unlikely, only at t=0).
+        let val = if micros == EMPTY_SLOT { 1 } else { micros };
+        self.slots[idx].store(val, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub async fn calculate_tps(&self, window_seconds: u64) -> f64 {
-        let timestamps = self.packet_timestamps.read().await;
-        let cutoff = Instant::now() - Duration::from_secs(window_seconds);
+    /// Count packets within the last `window_seconds` and compute TPS.
+    /// This is only called on `/tps` command — not on the hot path — so a full
+    /// scan of the ring is fine.
+    pub fn calculate_tps(&self, window_seconds: u64) -> f64 {
+        let now_micros = self.epoch.elapsed().as_micros() as u64;
+        let window_micros = window_seconds * 1_000_000;
+        let cutoff = now_micros.saturating_sub(window_micros);
 
-        let count = timestamps.iter().filter(|&&t| t > cutoff).count();
+        let mut count = 0u64;
+        for slot in self.slots.iter() {
+            let val = slot.load(std::sync::atomic::Ordering::Relaxed);
+            if val != EMPTY_SLOT && val >= cutoff {
+                count += 1;
+            }
+        }
+
         if count == 0 {
             return 20.0;
         }
