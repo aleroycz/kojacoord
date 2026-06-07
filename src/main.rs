@@ -96,21 +96,6 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to initialize proxy state")?,
     );
 
-    // Embedded dashboard API. Runs in-process so it serves live proxy state
-    // (online sessions, backend registry, live kicks) over HTTP. Spawned only
-    // when a dashboard config is present; its failure never stops the proxy.
-    let dash_config = "dashboard.toml";
-    if std::path::Path::new(dash_config).exists() {
-        let dash_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            if let Err(e) = kojacoord_dashboard_api::serve(dash_state, dash_config).await {
-                tracing::error!(error = %e, "dashboard API stopped");
-            }
-        });
-    } else {
-        tracing::info!("{} not found — dashboard API disabled", dash_config);
-    }
-
     // Anonymous, opt-out usage telemetry (metric.kojacoord.net). Honours
     // [telemetry] enabled in the config; never blocks or fails the proxy.
     kojacoord_proxy_core::telemetry::spawn(Arc::clone(&state));

@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::permissions::RoleRegistry;
 
-use kojacoord_anticheat::{AnticheatEngine, XrayEngine};
 use kojacoord_auth::{AuthConfig, AuthPipelineConfig};
 use kojacoord_cluster::{ClusterCoordinator, ServiceDiscovery};
 use kojacoord_config::ProxyConfig;
@@ -116,10 +115,6 @@ pub struct ProxyState {
     pub buffer_pool: Arc<BufferPool>,
     pub metrics: Arc<ProxyMetrics>,
     pub auth_pipeline_config: Arc<AuthPipelineConfig>,
-    pub anticheat: Arc<AnticheatEngine>,
-    /// Author : Starfloof.
-    pub xray: Arc<XrayEngine>,
-
     pub db: Option<Arc<crate::db::Db>>,
 
     pub roles: Arc<RoleRegistry>,
@@ -201,10 +196,6 @@ impl ProxyState {
             Arc::clone(&session_semaphore),
             auth_config,
         )?);
-
-        let anticheat = Arc::new(AnticheatEngine::new(config.anticheat.clone()));
-        // XRay honeypot engine — enabled whenever anticheat is enabled.
-        let xray = Arc::new(XrayEngine::new(config.anticheat.enabled, None));
 
         let db = if config.database.url.trim().is_empty() {
             let sqlite_path = "data/proxy.db";
@@ -341,8 +332,6 @@ impl ProxyState {
             buffer_pool: Arc::new(BufferPool::new()),
             metrics: Arc::new(ProxyMetrics::new()),
             auth_pipeline_config,
-            anticheat,
-            xray,
             db,
             roles: Arc::new(roles),
             outbound: Arc::new(DashMap::new()),

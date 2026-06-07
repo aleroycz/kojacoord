@@ -17,7 +17,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY src ./src
 COPY cargo-kpl ./cargo-kpl
-COPY dashboard-ui ./dashboard-ui
 
 # Build in release mode
 ENV SQLX_OFFLINE=true

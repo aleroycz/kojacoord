@@ -27,6 +27,7 @@ pub enum PluginEvent {
         x: f64,
         y: f64,
         z: f64,
+        on_ground: bool,
     },
     ServerMessage {
         message: String,

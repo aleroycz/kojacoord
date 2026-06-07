@@ -13,9 +13,8 @@ use crate::{
     exploit_guard::{build_kick_message, check_chat_message, ExploitGuard, KickReason},
     modloader,
     packet_builder::{
-        build_block_update_packet, build_brand_packet, build_disconnect_packet,
-        build_plugin_message_packet, build_serverbound_plugin_message_packet,
-        build_system_message_packet,
+        build_brand_packet, build_disconnect_packet, build_plugin_message_packet,
+        build_serverbound_plugin_message_packet, build_system_message_packet,
     },
     packet_ids::{cb_play, cb_plugin_message_id, chat_packet_ids_for, sb_plugin_message_id},
     packet_io::{read_packet, write_packet},
@@ -26,7 +25,6 @@ use crate::{
     transfer,
 };
 
-use kojacoord_anticheat::{parse_serverbound, AnticheatPacket};
 use kojacoord_plugin_system::{PacketData, PacketDirection, PacketHookResult};
 
 pub struct PacketRelay {
@@ -183,23 +181,22 @@ impl PacketRelay {
         let sb_chat_ids = chat_packet_ids_for(proto);
 
         let cb_chunk_id = cb_play(proto, "ClientboundLevelChunkWithLight");
-        // BlockUpdate packet ID — used to intercept server-sent block changes
-        // so we can remove honeypots that the real server has revealed.
-        let cb_block_update_id: u8 = {
-            use kojacoord_protocol::VersionRegistry;
+        let (sb_move_pos_rot_id, sb_move_pos_id): (u8, u8) = {
+            use kojacoord_protocol::{ProtocolVersion, VersionRegistry};
             match VersionRegistry::nearest(proto) {
-                kojacoord_protocol::ProtocolVersion::V1_7_10
-                | kojacoord_protocol::ProtocolVersion::V1_8
-                | kojacoord_protocol::ProtocolVersion::V1_12_2 => 0x23,
-                kojacoord_protocol::ProtocolVersion::V1_16_5 => 0x0B,
-                _ => 0x09, // 1.19+ and 1.21
+                ProtocolVersion::V1_7_10 | ProtocolVersion::V1_8 => (0x06, 0x04),
+                ProtocolVersion::V1_12_2 => (0x0E, 0x0C),
+                ProtocolVersion::V1_16_5 => (0x12, 0x10),
+                ProtocolVersion::V1_19_4
+                | ProtocolVersion::V1_20_4
+                | ProtocolVersion::Unknown(_) => (0x14, 0x12),
+                ProtocolVersion::V1_21 => (0x15, 0x13),
+                _ => (0xFF, 0xFF),
             }
         };
 
         let state_s2c = Arc::clone(&self.state);
         let state_c2s = Arc::clone(&self.state);
-        let xray_s2c = Arc::clone(&self.state.xray);
-        let xray_c2s = Arc::clone(&self.state.xray);
         let session_s2c = self.session.clone();
         let session_c2s = self.session.clone();
 
@@ -236,37 +233,6 @@ impl PacketRelay {
                     protocol = proto,
                     "packet"
                 );
-
-                // ─── BlockUpdate intercept (S→C) ──────────────────────────
-                // When the server reveals what a block actually is at a
-                // position we have a honeypot, remove the honeypot so
-                // the player can never get a false positive from it.
-                if pkt_id == cb_block_update_id {
-                    let mut body = payload.clone();
-                    let _ = VarInt::decode(&mut body);
-                    if let Ok(packed) = i64::decode(&mut body) {
-                        use kojacoord_protocol::VersionRegistry;
-                        let (bx, by, bz) = match VersionRegistry::nearest(proto) {
-                            kojacoord_protocol::ProtocolVersion::V1_7_10
-                            | kojacoord_protocol::ProtocolVersion::V1_8
-                            | kojacoord_protocol::ProtocolVersion::V1_12_2 => {
-                                // Legacy: X=63-38, Y=37-26, Z=25-0
-                                let bx = (packed >> 38) as i32;
-                                let by = ((packed >> 26) & 0xFFF) as i32;
-                                let bz = ((packed << 38) >> 38) as i32;
-                                (bx, by, bz)
-                            },
-                            _ => {
-                                // 1.14+: X=63-38, Z=37-12, Y=11-0
-                                let bx = (packed >> 38) as i32;
-                                let by = ((packed << 52) >> 52) as i32;
-                                let bz = ((packed << 26) >> 38) as i32;
-                                (bx, by, bz)
-                            }
-                        };
-                        xray_s2c.remove_honeypot(player_uuid, bx, by, bz);
-                    }
-                }
 
                 if pkt_id == cb_chunk_id {
                     let mut cw = cw_s2c.lock().await;
@@ -447,103 +413,49 @@ impl PacketRelay {
 
                     state_c2s.metrics.record_packet(payload.len());
 
-                    let packet = parse_serverbound(&payload, proto);
                     let session_data = session_c2s.read().await;
                     let uuid = session_data.uuid;
-                    let username = session_data.username.clone();
                     drop(session_data);
-                    match packet {
-                        // ─── XRay: player dug a honeypot block ───────────
-                        AnticheatPacket::Dig(ref dig) if dig.status == 0 => {
-                            if let Some(violation) = xray_c2s
-                                .check_dig(uuid, &username, dig.x, dig.y, dig.z)
-                                .await
-                            {
-                                tracing::warn!(
-                                    username = %username,
-                                    x = dig.x, y = dig.y, z = dig.z,
-                                    confidence = violation.value,
-                                    "xray: honeypot hit — kicking player"
-                                );
-                                kick!(
-                                    cw_c2s,
-                                    KickReason::Custom(
-                                        "Anticheat Violation".to_string(),
-                                        "XRay modification detected".to_string(),
-                                    ),
-                                    proto,
-                                    client_thresh
-                                );
+
+                    // Dispatch movement events to plugin system (anticheat, etc.).
+                    if pkt_id == sb_move_pos_rot_id || pkt_id == sb_move_pos_id {
+                        let mut body = payload.clone();
+                        let _ = VarInt::decode(&mut body);
+                        if let (Ok(x), Ok(y), Ok(z)) = (
+                            f64::decode(&mut body),
+                            f64::decode(&mut body),
+                            f64::decode(&mut body),
+                        ) {
+                            if pkt_id == sb_move_pos_rot_id {
+                                let _ = f32::decode(&mut body);
+                                let _ = f32::decode(&mut body);
                             }
-                        },
-                        // ─── Movement: honeypot injection + anticheat ─────
-                        AnticheatPacket::Movement(ref movement) if movement.has_pos => {
-                            // Inject honeypot blocks when the player is underground.
-                            if movement.y < kojacoord_anticheat::xray::HONEYPOT_MAX_Y as f64 {
-                                let new_honeypots = xray_c2s.spawn_honeypots(
+                            let on_ground = bool::decode(&mut body).unwrap_or(false);
+                            let responses = state_c2s.plugin_manager.broadcast_event(
+                                &kojacoord_plugin_system::PluginEvent::PlayerMove {
                                     uuid,
-                                    movement.x,
-                                    movement.y,
-                                    movement.z,
-                                );
-                                if !new_honeypots.is_empty() {
-                                    let mut cw = cw_c2s.lock().await;
-                                    for hp in &new_honeypots {
-                                        let pkt = build_block_update_packet(
-                                            hp.x, hp.y, hp.z,
-                                            hp.block_state_id,
+                                    x,
+                                    y,
+                                    z,
+                                    on_ground,
+                                },
+                            );
+                            for resp in responses {
+                                if let kojacoord_plugin_system::PluginResponse::KickPlayer { uuid: kicked_uuid, reason } = resp {
+                                    if kicked_uuid == uuid {
+                                        kick!(
+                                            cw_c2s,
+                                            KickReason::Custom(
+                                                "Anticheat Violation".to_string(),
+                                                reason,
+                                            ),
                                             proto,
+                                            client_thresh
                                         );
-                                        if write_packet(&mut *cw, &pkt, client_thresh)
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
                                     }
-                                    tracing::debug!(
-                                        username = %username,
-                                        count = new_honeypots.len(),
-                                        "xray: injected honeypot blocks"
-                                    );
                                 }
                             }
-
-                            // Standard movement anticheat.
-                            if let Some(violation) = state_c2s
-                                .anticheat
-                                .check_movement(
-                                    uuid,
-                                    &username,
-                                    movement.x,
-                                    movement.y,
-                                    movement.z,
-                                    movement.on_ground,
-                                    0, // ping_ms — not yet available in relay context
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    username = %username,
-                                    violation = ?violation,
-                                    "anticheat violation detected"
-                                );
-                                kick!(
-                                    cw_c2s,
-                                    KickReason::Custom(
-                                        "Anticheat Violation".to_string(),
-                                        format!(
-                                            "{} detected",
-                                            violation.check_category.human_name()
-                                        )
-                                    ),
-                                    proto,
-                                    client_thresh
-                                );
-                            }
-                        },
-                        AnticheatPacket::Chat { message } if message.starts_with('/') => {},
-                        _ => {},
+                        }
                     }
 
                     if pkt_id == sb_pm_id {
@@ -552,13 +464,6 @@ impl PacketRelay {
                         if let Ok(msg) =
                             plugin_decoder::decode_serverbound_plugin_message(body, proto)
                         {
-                            if msg.channel == "minecraft:brand" || msg.channel == "MC|Brand" {
-                                if let Ok(brand) = String::from_utf8(msg.data.clone()) {
-                                    let uuid = session_c2s.read().await.uuid;
-                                    state_c2s.anticheat.register_mod_brand(uuid, brand).await;
-                                }
-                            }
-
                             if modloader::is_fml1_play_channel(&msg.channel) {
                                 modloader::log_fml1_packet(&msg.channel, &msg.data, "C→S", proto);
                             }
@@ -766,8 +671,6 @@ impl PacketRelay {
 
         self.state.outbound.remove(&player_uuid);
         self.state.backend_outbound.remove(&player_uuid);
-        // Clean up XRay honeypot state for this player.
-        self.state.xray.player_quit(player_uuid);
 
         if let Some(srv_name) = self.session.read().await.current_server.clone() {
             if let Some(srv) = self.state.server_registry.get(&srv_name) {

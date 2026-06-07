@@ -1,20 +1,21 @@
-![Koja Banner](./docs/koja_banner.png)
-
 # Kojacoord Proxy
 
-[![Build Status](https://github.com/aleroycz/kojacoord-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/aleroycz/kojacoord-proxy/actions/workflows/ci.yml)
-[![Release](https://github.com/aleroycz/kojacoord-proxy/actions/workflows/release.yml/badge.svg)](https://github.com/aleroycz/kojacoord-proxy/actions/workflows/release.yml)
+<div align="center">
+
+[![Website](https://img.shields.io/badge/website-kojacraft.net-blue?style=for-the-badge)](https://www.kojacraft.net)
+[![Discord](https://img.shields.io/badge/discord-join-purple?style=for-the-badge&logo=discord)](https://discord.gg/kojacraft)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
-[![codecov](https://codecov.io/gh/aleroycz/kojacoord-proxy/branch/main/graph/badge.svg)](https://codecov.io/gh/aleroycz/kojacoord-proxy)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/kojacoord-proxy)](https://crates.io/crates/kojacoord-proxy)
 [![Documentation](https://img.shields.io/badge/docs.rs-kojacoord--proxy-blue)](https://docs.rs/kojacoord-proxy)
 
-A high-performance, modular Minecraft proxy server written in Rust, designed for multi-version protocol support, authentication management, and advanced network features.
+</div>
+
+A high-performance, modular Minecraft proxy server written in Rust, designed for multi-version protocol support, authentication management, and advanced network features. Built by [KojaCraft](https://www.kojacraft.net) to power our modded Minecraft network.
 
 ## Overview
 
-Kojacoord Proxy is a sophisticated proxy server that sits between Minecraft clients and backend servers, providing protocol translation, authentication, anti-cheat mechanisms, and extensive configuration options. Built with Rust's async runtime (Tokio), it offers high concurrency and low latency for large-scale Minecraft networks.
+Kojacoord Proxy sits between Minecraft clients and backend servers, providing protocol translation, authentication, anti-cheat mechanisms, and extensive configuration options. Built with Rust's async runtime (Tokio), it offers high concurrency and low latency for large-scale Minecraft networks.
 
 ## Features
 

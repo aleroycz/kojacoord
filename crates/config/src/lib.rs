@@ -12,9 +12,6 @@ pub struct ProxyConfig {
     pub forwarding: ForwardingSection,
 
     #[serde(default)]
-    pub anticheat: AnticheatConfig,
-
-    #[serde(default)]
     pub servers: Vec<ServerEntry>,
 
     #[serde(default)]
@@ -354,39 +351,6 @@ pub struct ServerManagementConfig {
     pub auth_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnticheatConfig {
-    #[serde(default = "bool_true")]
-    pub enabled: bool,
-
-    #[serde(default = "default_max_speed")]
-    pub max_speed_blocks_per_tick: f64,
-
-    #[serde(default = "default_max_cps")]
-    pub max_cps: u32,
-
-    pub bridge_endpoint: Option<String>,
-
-    #[serde(default)]
-    pub bridge_token: String,
-
-    #[serde(default = "bool_true")]
-    pub store_violations: bool,
-}
-
-impl Default for AnticheatConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_speed_blocks_per_tick: default_max_speed(),
-            max_cps: default_max_cps(),
-            bridge_endpoint: None,
-            bridge_token: String::new(),
-            store_violations: true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MetricsBackendConfig {
     #[serde(default)]
@@ -428,12 +392,6 @@ fn default_max_conns_per_ip() -> u32 {
 }
 fn default_db_pool_size() -> u32 {
     10
-}
-fn default_max_speed() -> f64 {
-    0.7
-}
-fn default_max_cps() -> u32 {
-    20
 }
 fn bool_true() -> bool {
     true

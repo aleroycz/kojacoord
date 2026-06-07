@@ -4,14 +4,11 @@ members = [
     "crates/netty",
     "crates/auth",
     "crates/proxy-core",
-    "crates/anticheat",
     "crates/config",
     "crates/api",
-    "crates/dashboard-api",
     "crates/plugin-system",
     "crates/cluster",
     "crates/metrics",
-    "cargo-kpl",
 ]
 resolver = "2"
 
@@ -29,7 +26,6 @@ tracing-subscriber = { workspace = true }
 kojacoord-config = { path = "crates/config" }
 kojacoord-auth = { path = "crates/auth" }
 kojacoord-proxy-core = { path = "crates/proxy-core" }
-kojacoord-dashboard-api = { path = "crates/dashboard-api" }
 tracing-appender = "0.2"
 flate2 = "1.0"
 chrono = { workspace = true }

@@ -48,12 +48,6 @@ config.prod.toml
 plugins/
 *.kpl
 
-# Dashboard UI (will be built separately)
-dashboard-ui/node_modules/
-dashboard-ui/.next/
-dashboard-ui/out/
-dashboard-ui/build/
-
 # Testing
 test-results/
 coverage/

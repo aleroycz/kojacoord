@@ -17,7 +17,6 @@ reqwest = { workspace = true }
 kojacoord-protocol = { path = "../protocol" }
 kojacoord-netty = { path = "../netty" }
 kojacoord-auth = { workspace = true }
-kojacoord-anticheat = { path = "../anticheat" }
 kojacoord-config = { path = "../config" }
 kojacoord-api = { path = "../api" }
 kojacoord-plugin-system = { path = "../plugin-system" }
