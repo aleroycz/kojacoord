@@ -218,8 +218,28 @@ impl Decode for String {
         if src.remaining() < len {
             return Err(ProtocolError::UnexpectedEof);
         }
-        let bytes = src.copy_to_bytes(len);
-        Ok(String::from_utf8(bytes.to_vec())?)
+
+        // Fast path for contiguous chunk
+        let chunk = src.chunk();
+        if chunk.len() >= len {
+            let slice = &chunk[..len];
+            if simdutf8::basic::from_utf8(slice).is_err() {
+                // Fallback to std to generate the proper FromUtf8Error
+                let buf = src.copy_to_bytes(len).to_vec();
+                return Ok(String::from_utf8(buf)?);
+            }
+            // Validated by simdutf8, construct directly
+            let s = unsafe { String::from_utf8_unchecked(slice.to_vec()) };
+            src.advance(len);
+            return Ok(s);
+        }
+
+        // Slow path: copy bytes from multiple chunks
+        let buf = src.copy_to_bytes(len).to_vec();
+        if simdutf8::basic::from_utf8(&buf).is_err() {
+            return Ok(String::from_utf8(buf)?);
+        }
+        Ok(unsafe { String::from_utf8_unchecked(buf) })
     }
 }
 

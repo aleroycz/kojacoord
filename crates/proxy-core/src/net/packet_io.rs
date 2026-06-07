@@ -21,18 +21,76 @@ pub fn encode_frame(body: &[u8]) -> BytesMut {
     out
 }
 
-pub async fn read_frame<R: AsyncReadExt + Unpin>(src: &mut R) -> Result<Bytes, ConnectionError> {
-    let len = read_varint(src).await?;
-    if len < 0 || len as usize > MAX_PACKET_SIZE {
-        return Err(ConnectionError::Protocol(ProtocolError::PacketTooLarge(
-            len as usize,
-            MAX_PACKET_SIZE,
-        )));
+pub struct ConnectionReader<R> {
+    src: R,
+    buf: BytesMut,
+}
+
+impl<R: AsyncReadExt + Unpin> ConnectionReader<R> {
+    pub fn new(src: R) -> Self {
+        Self {
+            src,
+            buf: BytesMut::with_capacity(8192),
+        }
     }
-    let mut body = GLOBAL_BUFFER_POOL.acquire(len as usize);
-    body.resize(len as usize, 0);
-    src.read_exact(&mut body).await?;
-    Ok(body.freeze())
+
+    pub fn into_inner(self) -> R {
+        self.src
+    }
+
+    pub async fn read_packet(&mut self, threshold: i32) -> Result<Bytes, ConnectionError> {
+        loop {
+            let mut result: u32 = 0;
+            let mut shift = 0;
+            let mut header_len = 0;
+            let mut valid = false;
+
+            for i in 0..self.buf.len() {
+                let byte = self.buf[i];
+                result |= ((byte & 0x7F) as u32) << shift;
+                shift += 7;
+                header_len += 1;
+                if byte & 0x80 == 0 {
+                    valid = true;
+                    break;
+                }
+                if i == 4 {
+                    return Err(ConnectionError::Protocol(ProtocolError::VarIntOverflow(5)));
+                }
+            }
+
+            if valid {
+                let packet_len = result as usize;
+                if packet_len > MAX_PACKET_SIZE {
+                    return Err(ConnectionError::Protocol(ProtocolError::PacketTooLarge(
+                        packet_len,
+                        MAX_PACKET_SIZE,
+                    )));
+                }
+
+                let total_len = header_len + packet_len;
+                if self.buf.len() >= total_len {
+                    // We have the full frame!
+                    use bytes::Buf;
+                    self.buf.advance(header_len);
+                    let body = self.buf.split_to(packet_len).freeze();
+                    if threshold >= 0 {
+                        return decompress(body);
+                    } else {
+                        return Ok(body);
+                    }
+                }
+            }
+
+            // Need more data
+            if self.buf.capacity() < 8192 {
+                self.buf.reserve(8192);
+            }
+            if self.src.read_buf(&mut self.buf).await? == 0 {
+                return Err(ConnectionError::Closed);
+            }
+        }
+    }
 }
 
 pub fn compress(raw: &[u8], threshold: i32) -> BytesMut {
@@ -89,6 +147,20 @@ pub fn encode_packet(raw: &[u8], threshold: i32) -> BytesMut {
     } else {
         encode_frame(raw)
     }
+}
+
+pub async fn read_frame<R: AsyncReadExt + Unpin>(src: &mut R) -> Result<Bytes, ConnectionError> {
+    let len = read_varint(src).await?;
+    if len < 0 || len as usize > MAX_PACKET_SIZE {
+        return Err(ConnectionError::Protocol(ProtocolError::PacketTooLarge(
+            len as usize,
+            MAX_PACKET_SIZE,
+        )));
+    }
+    let mut body = GLOBAL_BUFFER_POOL.acquire(len as usize);
+    body.resize(len as usize, 0);
+    src.read_exact(&mut body).await?;
+    Ok(body.freeze())
 }
 
 pub async fn read_packet<R: AsyncReadExt + Unpin>(

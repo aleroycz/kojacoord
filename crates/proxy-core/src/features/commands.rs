@@ -9,6 +9,8 @@ pub enum CommandResult {
     NotACommand,
 
     Error(String),
+
+    Switch(String),
 }
 
 pub async fn handle_command(
@@ -154,7 +156,7 @@ async fn handle_server(
         }
         send_message(format!("§aConnecting you to §f{}§a…", target));
 
-        CommandResult::Handled
+        CommandResult::Switch(target.to_owned())
     }
 }
 
@@ -184,7 +186,7 @@ async fn handle_hub(
     }
 
     send_message(format!("§aSending you to §f{}§a…", default));
-    CommandResult::Handled
+    CommandResult::Switch(default)
 }
 
 async fn handle_glist(

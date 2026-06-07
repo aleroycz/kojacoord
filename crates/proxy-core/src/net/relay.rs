@@ -10,7 +10,7 @@ use crate::{
     commands,
     converter::{ConversionDirection, ConversionResult, PacketConverter},
     error::ConnectionError,
-    exploit_guard::{build_kick_message, check_chat_message, ExploitGuard, KickReason},
+    exploit_guard::{build_kick_message, check_chat_message, ExploitGuard},
     modloader,
     packet_builder::{
         build_block_update_packet, build_brand_packet, build_disconnect_packet,
@@ -18,7 +18,7 @@ use crate::{
         build_system_message_packet,
     },
     packet_ids::{cb_play, cb_plugin_message_id, chat_packet_ids_for, sb_plugin_message_id},
-    packet_io::{read_packet, write_packet},
+    packet_io::write_packet,
     plugin_decoder,
     proxy::ProxyState,
     server_selector,
@@ -40,6 +40,7 @@ pub struct PacketRelay {
     pub ml_kind: modloader::ModloaderKind,
     pub conversion_enabled: bool,
     pub backend_protocol: u32,
+    pub ignore_movement_until: Option<tokio::time::Instant>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -104,9 +105,9 @@ impl PacketRelay {
         .await?;
 
         let (cr, cw) = tokio::io::split(self.client_stream);
-        let mut cr = tokio::io::BufReader::with_capacity(8192, cr);
+        let mut cr = crate::net::packet_io::ConnectionReader::new(cr);
         let (br, mut bw) = self.backend_stream.into_split();
-        let mut br = tokio::io::BufReader::with_capacity(8192, br);
+        let mut br = crate::net::packet_io::ConnectionReader::new(br);
 
         let cw_master = Arc::new(Mutex::new(cw));
         let cw_s2c = Arc::clone(&cw_master);
@@ -136,6 +137,11 @@ impl PacketRelay {
         self.state
             .backend_outbound
             .insert(player_uuid, backend_out_tx.clone());
+
+        let (violation_tx, mut violation_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+
+        let ignore_movement_until = self.ignore_movement_until;
 
         // Query pending purchases and deliver them immediately!
         if let Some(db) = &self.state.db {
@@ -212,7 +218,7 @@ impl PacketRelay {
                 let payload = tokio::select! {
                     biased;
                     _ = stop_s2c_wait.notified() => return Ok(()),
-                    r = read_packet(&mut *br_mut, backend_thresh) => r?,
+                    r = br_mut.read_packet(backend_thresh) => r?,
                 };
 
                 state_s2c.metrics.record_packet(payload.len());
@@ -403,6 +409,16 @@ impl PacketRelay {
                     let payload = tokio::select! {
                         biased;
                         _ = stop_c2s_wait.notified() => return Ok(()),
+                        Some(req) = violation_rx.recv() => {
+                            let uname = session_c2s.read().await.username.clone();
+                            tracing::warn!(username = %uname, "anticheat violation detected (async): {} - {}", req.0, req.1);
+                            kick!(
+                                cw_c2s,
+                                crate::exploit_guard::KickReason::Custom(req.0, req.1),
+                                proto,
+                                client_thresh
+                            );
+                        }
                         backend_pkt = backend_out_rx.recv() => {
                             match backend_pkt {
                                 Some(raw) => {
@@ -412,7 +428,7 @@ impl PacketRelay {
                                 None => return Ok(()),
                             }
                         }
-                        r = read_packet(&mut *cr_mut, client_thresh) => r?,
+                        r = cr_mut.read_packet(client_thresh) => r?,
                     };
 
                     // Per-connection abuse guard: enforce inbound packet-rate and
@@ -455,29 +471,25 @@ impl PacketRelay {
                     match packet {
                         // ─── XRay: player dug a honeypot block ───────────
                         AnticheatPacket::Dig(ref dig) if dig.status == 0 => {
-                            if let Some(violation) = xray_c2s
-                                .check_dig(uuid, &username, dig.x, dig.y, dig.z)
-                                .await
-                            {
-                                tracing::warn!(
-                                    username = %username,
-                                    x = dig.x, y = dig.y, z = dig.z,
-                                    confidence = violation.value,
-                                    "xray: honeypot hit — kicking player"
-                                );
-                                kick!(
-                                    cw_c2s,
-                                    KickReason::Custom(
-                                        "Anticheat Violation".to_string(),
-                                        "XRay modification detected".to_string(),
-                                    ),
-                                    proto,
-                                    client_thresh
-                                );
-                            }
+                            let ac = Arc::clone(&xray_c2s);
+                            let v_tx = violation_tx.clone();
+                            let d_x = dig.x; let d_y = dig.y; let d_z = dig.z;
+                            let uname = username.clone();
+                            tokio::spawn(async move {
+                                if let Some(_violation) = ac.check_dig(uuid, &uname, d_x, d_y, d_z).await {
+                                    let _ = v_tx.send(("Anticheat Violation".to_string(), "XRay modification detected".to_string()));
+                                }
+                            });
                         },
                         // ─── Movement: honeypot injection + anticheat ─────
                         AnticheatPacket::Movement(ref movement) if movement.has_pos => {
+                            if let Some(until) = ignore_movement_until {
+                                if tokio::time::Instant::now() < until {
+                                    tracing::trace!("dropping old movement packet during switch");
+                                    continue;
+                                }
+                            }
+
                             // Inject honeypot blocks when the player is underground.
                             if movement.y < kojacoord_anticheat::xray::HONEYPOT_MAX_Y as f64 {
                                 let new_honeypots = xray_c2s.spawn_honeypots(
@@ -494,53 +506,25 @@ impl PacketRelay {
                                             hp.block_state_id,
                                             proto,
                                         );
-                                        if write_packet(&mut *cw, &pkt, client_thresh)
-                                            .await
-                                            .is_err()
-                                        {
+                                        if write_packet(&mut *cw, &pkt, client_thresh).await.is_err() {
                                             break;
                                         }
                                     }
-                                    tracing::debug!(
-                                        username = %username,
-                                        count = new_honeypots.len(),
-                                        "xray: injected honeypot blocks"
-                                    );
                                 }
                             }
 
-                            // Standard movement anticheat.
-                            if let Some(violation) = state_c2s
-                                .anticheat
-                                .check_movement(
-                                    uuid,
-                                    &username,
-                                    movement.x,
-                                    movement.y,
-                                    movement.z,
-                                    movement.on_ground,
-                                    0, // ping_ms — not yet available in relay context
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    username = %username,
-                                    violation = ?violation,
-                                    "anticheat violation detected"
-                                );
-                                kick!(
-                                    cw_c2s,
-                                    KickReason::Custom(
-                                        "Anticheat Violation".to_string(),
-                                        format!(
-                                            "{} detected",
-                                            violation.check_category.human_name()
-                                        )
-                                    ),
-                                    proto,
-                                    client_thresh
-                                );
-                            }
+                            // Standard movement anticheat (offloaded to background task).
+                            let ac = Arc::clone(&state_c2s.anticheat);
+                            let v_tx = violation_tx.clone();
+                            let uname = username.clone();
+                            let m_x = movement.x; let m_y = movement.y; let m_z = movement.z;
+                            let m_onground = movement.on_ground;
+
+                            tokio::spawn(async move {
+                                if let Some(violation) = ac.check_movement(uuid, &uname, m_x, m_y, m_z, m_onground, 0).await {
+                                    let _ = v_tx.send(("Anticheat Violation".to_string(), format!("{} detected", violation.check_category.human_name())));
+                                }
+                            });
                         },
                         AnticheatPacket::Chat { message } if message.starts_with('/') => {},
                         _ => {},
@@ -555,7 +539,10 @@ impl PacketRelay {
                             if msg.channel == "minecraft:brand" || msg.channel == "MC|Brand" {
                                 if let Ok(brand) = String::from_utf8(msg.data.clone()) {
                                     let uuid = session_c2s.read().await.uuid;
-                                    state_c2s.anticheat.register_mod_brand(uuid, brand).await;
+                                    let ac = Arc::clone(&state_c2s.anticheat);
+                                    tokio::spawn(async move {
+                                        ac.register_mod_brand(uuid, brand).await;
+                                    });
                                 }
                             }
 
@@ -692,8 +679,24 @@ impl PacketRelay {
                                     }
                                 }
 
-                                if matches!(result, commands::CommandResult::Handled) {
-                                    continue;
+                                match result {
+                                    commands::CommandResult::Handled => continue,
+                                    commands::CommandResult::Switch(target) => {
+                                        if request_switch(
+                                            &target,
+                                            &state_c2s,
+                                            &switch_c2s,
+                                            &cw_c2s,
+                                            proto,
+                                            client_thresh,
+                                        )
+                                        .await?
+                                        {
+                                            return Ok(());
+                                        }
+                                        continue;
+                                    }
+                                    _ => {} // Not a command or error
                                 }
                             } else {
                                 let (rank, name) = {

@@ -2,12 +2,16 @@ use chrono::{DateTime, Timelike, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub struct AnalyticsEngine {
     hourly_buckets: Arc<DashMap<String, (u64, u64)>>, // (Joins, Leaves)
-    aggregates: Arc<RwLock<AnalyticsAggregates>>,
+    total_players: AtomicU64,
+    peak_players: AtomicU64,
+    total_violations: AtomicU64,
+    violations_by_type: Arc<DashMap<String, AtomicU64>>,
+    start_time: DateTime<Utc>,
     retention_hours: u64,
 }
 
@@ -42,14 +46,11 @@ impl AnalyticsEngine {
     pub fn new(retention_hours: u64) -> Self {
         Self {
             hourly_buckets: Arc::new(DashMap::new()),
-            aggregates: Arc::new(RwLock::new(AnalyticsAggregates {
-                total_players: 0,
-                peak_players: 0,
-                total_violations: 0,
-                violations_by_type: HashMap::new(),
-                uptime_seconds: 0,
-                start_time: Utc::now(),
-            })),
+            total_players: AtomicU64::new(0),
+            peak_players: AtomicU64::new(0),
+            total_violations: AtomicU64::new(0),
+            violations_by_type: Arc::new(DashMap::new()),
+            start_time: Utc::now(),
             retention_hours,
         }
     }
@@ -57,28 +58,26 @@ impl AnalyticsEngine {
     pub async fn record_event(&self, event: AnalyticsEvent) {
         let hour_key = event.timestamp.format("%Y-%m-%d-%H").to_string();
 
-        let mut aggregates = self.aggregates.write().await;
         let mut entry = self.hourly_buckets.entry(hour_key).or_insert((0, 0));
 
         match &event.event_type {
             EventType::PlayerJoin => {
                 entry.0 += 1;
-                aggregates.total_players += 1;
-                if aggregates.total_players > aggregates.peak_players {
-                    aggregates.peak_players = aggregates.total_players;
-                }
+                let current = self.total_players.fetch_add(1, Ordering::Relaxed) + 1;
+                self.peak_players.fetch_max(current, Ordering::Relaxed);
             },
             EventType::PlayerLeave => {
                 entry.1 += 1;
-                aggregates.total_players = aggregates.total_players.saturating_sub(1);
+                self.total_players.fetch_sub(1, Ordering::Relaxed); // Assumes we don't underflow
             },
             EventType::Violation => {
-                aggregates.total_violations += 1;
+                self.total_violations.fetch_add(1, Ordering::Relaxed);
                 if let Some(check_name) = event.data.get("check_name").and_then(|v| v.as_str()) {
-                    *aggregates
+                    let counter = self
                         .violations_by_type
                         .entry(check_name.to_string())
-                        .or_insert(0) += 1;
+                        .or_insert_with(|| AtomicU64::new(0));
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
             },
             _ => {},
@@ -92,14 +91,28 @@ impl AnalyticsEngine {
     }
 
     pub async fn get_aggregates(&self) -> AnalyticsAggregates {
-        let mut aggregates = self.aggregates.write().await;
-        aggregates.uptime_seconds = (Utc::now() - aggregates.start_time).num_seconds() as u64;
-        aggregates.clone()
+        let uptime_seconds = (Utc::now() - self.start_time).num_seconds() as u64;
+        let mut violations = HashMap::new();
+        for ref_kv in self.violations_by_type.iter() {
+            violations.insert(ref_kv.key().clone(), ref_kv.value().load(Ordering::Relaxed));
+        }
+
+        AnalyticsAggregates {
+            total_players: self.total_players.load(Ordering::Relaxed),
+            peak_players: self.peak_players.load(Ordering::Relaxed),
+            total_violations: self.total_violations.load(Ordering::Relaxed),
+            violations_by_type: violations,
+            uptime_seconds,
+            start_time: self.start_time,
+        }
     }
 
     pub async fn get_violation_stats(&self) -> HashMap<String, u64> {
-        let aggregates = self.aggregates.read().await;
-        aggregates.violations_by_type.clone()
+        let mut stats = HashMap::new();
+        for ref_kv in self.violations_by_type.iter() {
+            stats.insert(ref_kv.key().clone(), ref_kv.value().load(Ordering::Relaxed));
+        }
+        stats
     }
 
     pub async fn get_player_history(&self, hours: u64) -> Vec<(DateTime<Utc>, u64)> {

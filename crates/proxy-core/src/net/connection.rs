@@ -705,9 +705,10 @@ impl ClientConnection {
         // without ever dropping the client.
         let mut backend = backend;
         let mut backend_threshold = backend_threshold;
+        let mut just_switched = false;
         let result = loop {
             match self
-                .relay(backend, session.clone(), backend_threshold)
+                .relay(backend, session.clone(), backend_threshold, just_switched)
                 .await
             {
                 Ok(crate::relay::RelayExit::Disconnected) => break Ok(()),
@@ -724,6 +725,7 @@ impl ClientConnection {
                         Ok((new_backend, new_threshold)) => {
                             backend = new_backend;
                             backend_threshold = new_threshold;
+                            just_switched = true;
                             continue;
                         },
                         Err(e) => {
@@ -2024,6 +2026,7 @@ impl ClientConnection {
         backend: TcpStream,
         session: SharedSession,
         backend_compression_threshold: i32,
+        just_switched: bool,
     ) -> Result<crate::relay::RelayExit, ConnectionError> {
         let current_server = session.read().await.current_server.clone();
         let lobby_name = &self.state.config.proxy.lobby_server_name;
@@ -2070,6 +2073,12 @@ impl ClientConnection {
             );
         }
 
+        let ignore_movement_until = if just_switched {
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(1500))
+        } else {
+            None
+        };
+
         PacketRelay {
             client_stream: std::mem::replace(&mut self.stream, McStream::Empty),
             backend_stream: backend,
@@ -2081,6 +2090,7 @@ impl ClientConnection {
             ml_kind: self.ml_session.kind,
             conversion_enabled: is_lobby,
             backend_protocol,
+            ignore_movement_until,
         }
         .run()
         .await

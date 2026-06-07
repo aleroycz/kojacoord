@@ -25,22 +25,47 @@ impl VarInt {
 impl Encode for VarInt {
     fn encode(&self, dst: &mut BytesMut) -> Result<(), ProtocolError> {
         let mut val = self.0 as u32;
+        let mut buf = [0u8; VARINT_MAX_BYTES];
+        let mut len = 0;
         loop {
             let byte = (val & 0x7F) as u8;
             val >>= 7;
             if val != 0 {
-                dst.put_u8(byte | 0x80);
+                buf[len] = byte | 0x80;
+                len += 1;
             } else {
-                dst.put_u8(byte);
+                buf[len] = byte;
+                len += 1;
                 break;
             }
         }
+        dst.put_slice(&buf[..len]);
         Ok(())
     }
 }
 
 impl Decode for VarInt {
     fn decode(src: &mut Bytes) -> Result<Self, ProtocolError> {
+        let chunk = src.chunk();
+        if chunk.len() >= VARINT_MAX_BYTES {
+            // Fast path: contiguous bytes available.
+            let mut result: u32 = 0;
+            let mut shift = 0u32;
+            let mut bytes_read = 0;
+
+            for &byte in &chunk[..VARINT_MAX_BYTES] {
+                bytes_read += 1;
+                result |= ((byte & 0x7F) as u32) << shift;
+                shift += 7;
+                if byte & 0x80 == 0 {
+                    src.advance(bytes_read);
+                    return Ok(VarInt(result as i32));
+                }
+            }
+            return Err(ProtocolError::VarIntOverflow(VARINT_MAX_BYTES));
+        }
+
+        // Slow path: spans chunks or near EOF.
         let mut result: u32 = 0;
         let mut shift = 0u32;
         let mut bytes_read = 0;
