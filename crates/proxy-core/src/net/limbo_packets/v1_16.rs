@@ -41,7 +41,7 @@ impl LimboPackets for V1_16 {
         // Hand-encode here per minecraft.wiki Java_Edition_protocol
         // §Join_Game / BungeeCord `Login.java` per-version branches.
         if proto < 735 {
-            return Some(build_join_game_1_13_through_1_15(proto, world_name)?);
+            return build_join_game_1_13_through_1_15(proto, world_name);
         }
         // 1.16+ JoinGame requires a Dimension Codec NBT — without it the
         // client reads the next field's bytes as the codec and falls off
@@ -87,7 +87,7 @@ impl LimboPackets for V1_16 {
         //                         (after gamemode), keeps level_type
         // Per minecraft.wiki §Respawn / BungeeCord `Respawn.java`.
         if proto < 735 {
-            return Some(build_respawn_1_13_through_1_15(proto)?);
+            return build_respawn_1_13_through_1_15(proto);
         }
         encode(
             proto,

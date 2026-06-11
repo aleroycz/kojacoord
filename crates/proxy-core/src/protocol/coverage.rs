@@ -313,7 +313,7 @@ impl ProtocolCoverage {
                     && self
                         .coverage
                         .get(&(from, to))
-                        .is_none_or(|s| *s == CoverageStatus::Missing)
+                        .map_or(true, |s| *s == CoverageStatus::Missing)
                 {
                     missing.push((from, to));
                 }
@@ -340,7 +340,7 @@ impl ProtocolCoverage {
                     && self
                         .canonical_coverage
                         .get(&(from, to))
-                        .is_none_or(|s| *s == CoverageStatus::Missing)
+                        .map_or(true, |s| *s == CoverageStatus::Missing)
                 {
                     missing.push((from, to));
                 }

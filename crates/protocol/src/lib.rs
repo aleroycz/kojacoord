@@ -15,6 +15,9 @@
 //! The proxy crate dispatches on `ProtocolVersion::canonical_typed_packet_version()`
 //! to pick which `versions::*` family to use for a given client.
 
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::doc_overindented_list_items)]
+
 pub mod codec;
 pub mod dimension_codec;
 pub mod error;

@@ -500,10 +500,8 @@ impl ClientConnection {
         // `MinecraftEdition::Bedrock.is_implemented()` returns `false`
         // today; once the dedicated Bedrock pipeline lands, this
         // branch will dispatch into it instead of kicking.
-        if peek[0] == 0x05 {
-            if self.peek_looks_like_bedrock().await {
-                return self.handle_bedrock_unsupported().await;
-            }
+        if peek[0] == 0x05 && self.peek_looks_like_bedrock().await {
+            return self.handle_bedrock_unsupported().await;
         }
 
         // Pre-netty (1.6.x) login detection.
@@ -678,12 +676,13 @@ impl ClientConnection {
     /// and skips the encryption dance entirely. Flow:
     ///   1. Parse the legacy Handshake packet 0x02
     ///      (protocol_version u8, username/host UCS-2 short-prefix,
-    ///       port i32) per minecraft.wiki / Spigot 1.6.4 sources.
+    ///      port i32) per minecraft.wiki / Spigot 1.6.4 sources.
     ///   2. Generate the canonical "OfflinePlayer:<name>" v3 UUID.
     ///   3. Hand off to `finalise_login`, which sends the 1.6.4
     ///      LoginRequest (0x01) — `send_login_success` already
     ///      dispatches on V1_6_4 to use pre-netty framing — then
     ///      routes the connection into the relay/limbo loop.
+    ///
     /// On any decode failure or pipeline error we fall back to a
     /// legacy 0xFF disconnect packet so the user sees a real message
     /// instead of a TCP reset.

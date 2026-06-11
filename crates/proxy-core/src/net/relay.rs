@@ -397,20 +397,18 @@ impl PacketRelay {
                 // shortly after configuration to announce itself.
                 if pkt_id == cb_pm_id {
                     if let Some(channel) = try_decode_plugin_channel(payload.clone()) {
-                        if channel == "vv:proxy_details"
-                            || channel == "viaversion:proxy_details"
-                        {
-                            if !via_version_detected_s2c
+                        if (channel == "vv:proxy_details"
+                            || channel == "viaversion:proxy_details")
+                            && !via_version_detected_s2c
                                 .swap(true, std::sync::atomic::Ordering::AcqRel)
-                            {
-                                tracing::info!(
-                                    target: "relay",
-                                    channel = %channel,
-                                    proto,
-                                    backend_proto,
-                                    "ViaVersion detected on backend — disabling proxy-side converter for this session"
-                                );
-                            }
+                        {
+                            tracing::info!(
+                                target: "relay",
+                                channel = %channel,
+                                proto,
+                                backend_proto,
+                                "ViaVersion detected on backend — disabling proxy-side converter for this session"
+                            );
                         }
                     }
                 }

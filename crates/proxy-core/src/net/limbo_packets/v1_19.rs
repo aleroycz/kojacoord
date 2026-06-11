@@ -42,7 +42,7 @@ impl LimboPackets for V1_19 {
         // phase entirely — those use the v1_20::V1_20 limbo bucket,
         // never this one.
         if (755..=758).contains(&proto) {
-            return Some(build_join_game_1_17_or_1_18(proto, world_name)?);
+            return build_join_game_1_17_or_1_18(proto, world_name);
         }
         if !(759..=763).contains(&proto) {
             return None;
@@ -82,7 +82,7 @@ impl LimboPackets for V1_19 {
         // (1.19+ additions) MUST be omitted for proto < 759 or the
         // client reads them as part of the next packet's framing.
         if (755..=758).contains(&proto) {
-            return Some(build_respawn_1_17_or_1_18(proto, world_name)?);
+            return build_respawn_1_17_or_1_18(proto, world_name);
         }
         if proto < 759 {
             return None;

@@ -1,0 +1,45 @@
+name: Auto-bump workspace version
+
+on:
+  push:
+    branches:
+      - develop/*
+      - master
+      - main
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump workspace version
+        run: |
+          # Skip if last commit was already a version bump
+          if git log -1 --pretty=%B | grep -q "chore: bump version"; then
+            echo "Already bumped, skipping"
+            exit 0
+          fi
+
+          # Extract current version from [workspace.package]
+          CURRENT=$(grep -A2 '^\[workspace.package\]' Cargo.toml | grep 'version' | head -1 | sed 's/.*= "\(.*\)".*/\1/')
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+
+          # Update [workspace.package] version
+          sed -i "s/^version = \"$CURRENT\"/version = \"$NEW_VERSION\"/" Cargo.toml
+
+          # Git config + commit
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          git commit -m "chore: bump version to $NEW_VERSION"
+          git tag "v$NEW_VERSION"
+          git push origin HEAD:${{ github.ref_name }} --tags
