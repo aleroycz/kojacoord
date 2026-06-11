@@ -54,29 +54,29 @@ const V112_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x1F;
 const V112_C2S_USE_ITEM: u8 = 0x20;
 
 // ---- 1.6.4 target ids (MCP-doc, decimal = hex) ----
-const V164_C2S_KEEP_ALIVE: u8 = 0x00;          // Packet0KeepAlive
-const V164_C2S_CHAT: u8 = 0x03;                // Packet3Chat
-const V164_C2S_USE_ENTITY: u8 = 0x07;          // Packet7UseEntity
+const V164_C2S_KEEP_ALIVE: u8 = 0x00; // Packet0KeepAlive
+const V164_C2S_CHAT: u8 = 0x03; // Packet3Chat
+const V164_C2S_USE_ENTITY: u8 = 0x07; // Packet7UseEntity
 /// Pre-netty c2s "still alive" packet. Not currently produced by our
 /// modern→pre-netty converter (modern clients don't emit a bare
 /// on-ground update either), but kept as documentation of the
 /// authentic 1.6.4 packet table per HexaCord.
 #[allow(dead_code)]
-const V164_C2S_PLAYER_ON_GROUND: u8 = 0x0A;    // Packet10Flying
-const V164_C2S_MOVE_PLAYER_POS: u8 = 0x0B;     // Packet11PlayerPosition
-const V164_C2S_MOVE_PLAYER_ROT: u8 = 0x0C;     // Packet12PlayerLook
-const V164_C2S_PLAYER_POS_LOOK: u8 = 0x0D;     // Packet13PlayerLookMove
-const V164_C2S_PLAYER_DIGGING: u8 = 0x0E;      // Packet14BlockDig
+const V164_C2S_PLAYER_ON_GROUND: u8 = 0x0A; // Packet10Flying
+const V164_C2S_MOVE_PLAYER_POS: u8 = 0x0B; // Packet11PlayerPosition
+const V164_C2S_MOVE_PLAYER_ROT: u8 = 0x0C; // Packet12PlayerLook
+const V164_C2S_PLAYER_POS_LOOK: u8 = 0x0D; // Packet13PlayerLookMove
+const V164_C2S_PLAYER_DIGGING: u8 = 0x0E; // Packet14BlockDig
 const V164_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x0F; // Packet15Place
-const V164_C2S_HELD_ITEM_CHANGE: u8 = 0x10;    // Packet16BlockItemSwitch
-const V164_C2S_ANIMATION: u8 = 0x12;           // Packet18Animation
-const V164_C2S_ENTITY_ACTION: u8 = 0x13;       // Packet19EntityAction
-const V164_C2S_CLIENT_COMMAND: u8 = 0x16;      // Packet22ClientCommand (respawn)
-const V164_C2S_CLOSE_WINDOW: u8 = 0x65;        // Packet101CloseWindow
-const V164_C2S_UPDATE_SIGN: u8 = 0x82;         // Packet130UpdateSign
-const V164_C2S_PLAYER_ABILITIES: u8 = 0xCA;    // PacketCAPlayerAbilities
-const V164_C2S_CLIENT_SETTINGS: u8 = 0xCC;     // PacketCCSettings
-const V164_C2S_PLUGIN_MESSAGE: u8 = 0xFA;      // PacketFAPluginMessage
+const V164_C2S_HELD_ITEM_CHANGE: u8 = 0x10; // Packet16BlockItemSwitch
+const V164_C2S_ANIMATION: u8 = 0x12; // Packet18Animation
+const V164_C2S_ENTITY_ACTION: u8 = 0x13; // Packet19EntityAction
+const V164_C2S_CLIENT_COMMAND: u8 = 0x16; // Packet22ClientCommand (respawn)
+const V164_C2S_CLOSE_WINDOW: u8 = 0x65; // Packet101CloseWindow
+const V164_C2S_UPDATE_SIGN: u8 = 0x82; // Packet130UpdateSign
+const V164_C2S_PLAYER_ABILITIES: u8 = 0xCA; // PacketCAPlayerAbilities
+const V164_C2S_CLIENT_SETTINGS: u8 = 0xCC; // PacketCCSettings
+const V164_C2S_PLUGIN_MESSAGE: u8 = 0xFA; // PacketFAPluginMessage
 
 pub fn convert_c2s(payload: Bytes) -> ConversionResult {
     let Some((id, body)) = split_id(payload.clone()) else {
@@ -435,7 +435,12 @@ fn c2s_update_sign(mut body: Bytes) -> ConversionResult {
     out.put_i32(pos.z);
     for line in lines {
         let s = line.unwrap_or_default();
-        let chars: Vec<u16> = s.chars().take(15).collect::<String>().encode_utf16().collect();
+        let chars: Vec<u16> = s
+            .chars()
+            .take(15)
+            .collect::<String>()
+            .encode_utf16()
+            .collect();
         out.put_u16(chars.len() as u16);
         for c in &chars {
             out.put_u16(*c);
@@ -504,7 +509,10 @@ mod tests {
                 assert_eq!(id, V164_C2S_KEEP_ALIVE);
                 assert_eq!(out.get_i32(), 0xDEAD_BEEFu32 as i32);
             },
-            other => panic!("expected Converted, got {:?}", core::mem::discriminant(&other)),
+            other => panic!(
+                "expected Converted, got {:?}",
+                core::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -525,7 +533,10 @@ mod tests {
                 assert_eq!(out.get_u16(), 0x0048); // 'H' big-endian
                 assert_eq!(out.get_u16(), 0x0069); // 'i' big-endian
             },
-            other => panic!("expected Converted, got {:?}", core::mem::discriminant(&other)),
+            other => panic!(
+                "expected Converted, got {:?}",
+                core::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -544,7 +555,10 @@ mod tests {
                 let n = out.get_u16();
                 assert_eq!(n, 100, "1.6.4 chat capped at 100 chars");
             },
-            other => panic!("expected Converted, got {:?}", core::mem::discriminant(&other)),
+            other => panic!(
+                "expected Converted, got {:?}",
+                core::mem::discriminant(&other)
+            ),
         }
     }
 }

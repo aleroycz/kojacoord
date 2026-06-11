@@ -344,14 +344,13 @@ impl Db {
             tracing::warn!(uuid = %uuid_str, "cached_profiles row has malformed UUID; dropping");
             return Ok(None);
         };
-        let properties: Vec<kojacoord_auth::ProfileProperty> =
-            match serde_json::from_str(&json) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "cached_profiles row has malformed properties_json");
-                    return Ok(None);
-                },
-            };
+        let properties: Vec<kojacoord_auth::ProfileProperty> = match serde_json::from_str(&json) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "cached_profiles row has malformed properties_json");
+                return Ok(None);
+            },
+        };
         Ok(Some((uuid, properties)))
     }
 

@@ -25,10 +25,10 @@ pub mod property_sig;
 pub mod session;
 
 pub use error::AuthError;
+pub use mojang_lookup::{resolve_mojang_uuid, MojangLookupError};
 pub use pipeline::{
     AuthConfig, AuthEvent, AuthOutbound, AuthPipeline, AuthPipelineConfig, AuthState, AuthType,
 };
-pub use mojang_lookup::{resolve_mojang_uuid, MojangLookupError};
 pub use property_sig::{
     parse_mojang_public_key, verify_properties, verify_property, PropertySigError,
 };

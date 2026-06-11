@@ -3,10 +3,10 @@ mod items;
 pub mod modern_to_v1_8;
 mod safe;
 pub mod v1_12_2_to_v1_16_5;
+pub mod v1_12_2_to_v1_6_4;
 pub mod v1_16_5_to_v1_12_2;
 pub mod v1_16_5_to_v1_20_4;
 pub mod v1_20_4_to_v1_16_5;
-pub mod v1_12_2_to_v1_6_4;
 pub mod v1_6_4_to_v1_12_2;
 pub mod v1_6_4_to_v1_16_5;
 pub mod v1_7_to_v1_8;
@@ -562,7 +562,10 @@ mod dispatch_tests {
                 // — is asserted by `v1_19_4_folds_to_v1_16_5_for_dispatch`
                 // above.
             },
-            other => panic!("unexpected dispatch result: {:?}", core::mem::discriminant(&other)),
+            other => panic!(
+                "unexpected dispatch result: {:?}",
+                core::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -627,7 +630,9 @@ mod dispatch_tests {
                 assert_eq!(out.len(), 1);
                 let mut bytes = out[0].clone();
                 use kojacoord_protocol::codec::Decode;
-                let id = kojacoord_protocol::types::VarInt::decode(&mut bytes).unwrap().0 as u8;
+                let id = kojacoord_protocol::types::VarInt::decode(&mut bytes)
+                    .unwrap()
+                    .0 as u8;
                 // The three-leg chain should land on the v1_12_2_to_v1_6_4
                 // KeepAlive arm which outputs id 0x00 + i32. But the first
                 // leg v1_20_4_to_v1_16_5 only handles specific c2s ids

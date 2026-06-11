@@ -13,33 +13,33 @@ use crate::converter::ConversionResult;
 // PlayerPositionAndLook and HeldItemChange straight through; the 1.12.2
 // backend then dropped them as malformed. Corrected against the MCP
 // decompile mirror.
-const V164_S2C_KEEP_ALIVE: u8 = 0x00;       // Packet0KeepAlive
-const V164_S2C_CHAT: u8 = 0x03;             // Packet3Chat
-const V164_S2C_PLAYER_POS_LOOK: u8 = 0x0D;  // Packet13PlayerLookMove (was 0x13)
-const V164_S2C_SPAWN_PLAYER: u8 = 0x14;     // Packet20NamedEntitySpawn
-const V164_S2C_ENTITY_TELEPORT: u8 = 0x18;  // Packet24EntityTeleport
-const V164_S2C_ENTITY_REL_MOVE: u8 = 0x15;  // Packet21EntityRelativeMove
-const V164_S2C_ENTITY: u8 = 0x1E;           // Packet30Entity
-const V164_S2C_BLOCK_CHANGE: u8 = 0x35;     // Packet53BlockChange
-const V164_S2C_SET_SLOT: u8 = 0x67;         // Packet103SetSlot
-const V164_S2C_WINDOW_ITEMS: u8 = 0x68;     // Packet104WindowItems
+const V164_S2C_KEEP_ALIVE: u8 = 0x00; // Packet0KeepAlive
+const V164_S2C_CHAT: u8 = 0x03; // Packet3Chat
+const V164_S2C_PLAYER_POS_LOOK: u8 = 0x0D; // Packet13PlayerLookMove (was 0x13)
+const V164_S2C_SPAWN_PLAYER: u8 = 0x14; // Packet20NamedEntitySpawn
+const V164_S2C_ENTITY_TELEPORT: u8 = 0x18; // Packet24EntityTeleport
+const V164_S2C_ENTITY_REL_MOVE: u8 = 0x15; // Packet21EntityRelativeMove
+const V164_S2C_ENTITY: u8 = 0x1E; // Packet30Entity
+const V164_S2C_BLOCK_CHANGE: u8 = 0x35; // Packet53BlockChange
+const V164_S2C_SET_SLOT: u8 = 0x67; // Packet103SetSlot
+const V164_S2C_WINDOW_ITEMS: u8 = 0x68; // Packet104WindowItems
 /// **Important**: the existing name is misleading — `0x1C` is actually
 /// `Packet28EntityVelocity` per the Notchian pre-netty table. Kept as
 /// `V164_S2C_ENTITY_EQUIPMENT` to avoid breaking callers; the real
 /// EntityEquipment packet is `Packet5EntityEquipment` (id 0x05).
 const V164_S2C_ENTITY_EQUIPMENT: u8 = 0x1C; // (actually Packet28EntityVelocity)
-const V164_S2C_EXPERIENCE: u8 = 0x2B;       // Packet43Experience
+const V164_S2C_EXPERIENCE: u8 = 0x2B; // Packet43Experience
 const V164_S2C_HELD_ITEM_CHANGE: u8 = 0x10; // Packet16BlockItemSwitch (was 0x09)
 const V164_S2C_PLAYER_ABILITIES: u8 = 0x43; // Packet67PlayerAbilities
-const V164_S2C_DISCONNECT: u8 = 0xFF;       // Packet255KickDisconnect
-// New batch (this audit) — common steady-state s2c packets.
-const V164_S2C_TIME_UPDATE: u8 = 0x04;        // Packet4UpdateTime
-const V164_S2C_SPAWN_POSITION: u8 = 0x06;     // Packet6SpawnPosition
-const V164_S2C_UPDATE_HEALTH: u8 = 0x08;      // Packet8UpdateHealth
-const V164_S2C_COLLECT_ITEM: u8 = 0x16;       // Packet22Collect
-const V164_S2C_DESTROY_ENTITIES: u8 = 0x1D;   // Packet29DestroyEntity
-const V164_S2C_ENTITY_HEAD_LOOK: u8 = 0x23;   // Packet35EntityHeadRotation
-const V164_S2C_PLUGIN_MESSAGE: u8 = 0xFA;     // Packet250CustomPayload
+const V164_S2C_DISCONNECT: u8 = 0xFF; // Packet255KickDisconnect
+                                      // New batch (this audit) — common steady-state s2c packets.
+const V164_S2C_TIME_UPDATE: u8 = 0x04; // Packet4UpdateTime
+const V164_S2C_SPAWN_POSITION: u8 = 0x06; // Packet6SpawnPosition
+const V164_S2C_UPDATE_HEALTH: u8 = 0x08; // Packet8UpdateHealth
+const V164_S2C_COLLECT_ITEM: u8 = 0x16; // Packet22Collect
+const V164_S2C_DESTROY_ENTITIES: u8 = 0x1D; // Packet29DestroyEntity
+const V164_S2C_ENTITY_HEAD_LOOK: u8 = 0x23; // Packet35EntityHeadRotation
+const V164_S2C_PLUGIN_MESSAGE: u8 = 0xFA; // Packet250CustomPayload
 
 const V112_S2C_KEEP_ALIVE: u8 = 0x1F;
 const V112_S2C_CHAT: u8 = 0x0F;
@@ -649,13 +649,13 @@ fn s2c_plugin_message(mut body: Bytes) -> ConversionResult {
 // `Packet5EntityEquipment` are entirely different packets. The
 // converter silently passed real 1.6.4 chat and movement c2s through
 // unconverted, and the 1.12.2 backend dropped them as malformed.
-const V164_C2S_KEEP_ALIVE: u8 = 0x00;          // Packet0KeepAlive
-const V164_C2S_CHAT: u8 = 0x03;                // Packet3Chat (was 0x01)
-const V164_C2S_PLAYER_POS_LOOK: u8 = 0x0D;     // Packet13PlayerLookMove (was 0x05)
-const V164_C2S_PLAYER_DIGGING: u8 = 0x0E;      // Packet14BlockDig
+const V164_C2S_KEEP_ALIVE: u8 = 0x00; // Packet0KeepAlive
+const V164_C2S_CHAT: u8 = 0x03; // Packet3Chat (was 0x01)
+const V164_C2S_PLAYER_POS_LOOK: u8 = 0x0D; // Packet13PlayerLookMove (was 0x05)
+const V164_C2S_PLAYER_DIGGING: u8 = 0x0E; // Packet14BlockDig
 const V164_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x0F; // Packet15Place
-const V164_C2S_HELD_ITEM_CHANGE: u8 = 0x10;    // Packet16BlockItemSwitch
-const V164_C2S_ENTITY_ACTION: u8 = 0x13;       // Packet19EntityAction
+const V164_C2S_HELD_ITEM_CHANGE: u8 = 0x10; // Packet16BlockItemSwitch
+const V164_C2S_ENTITY_ACTION: u8 = 0x13; // Packet19EntityAction
 
 const V112_C2S_KEEP_ALIVE: u8 = 0x0B;
 const V112_C2S_CHAT: u8 = 0x02;

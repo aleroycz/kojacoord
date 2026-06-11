@@ -346,27 +346,57 @@ pub fn build_set_compression(
         CanonicalVersion::V1_7_10 => None,
         CanonicalVersion::V1_8 => {
             use kojacoord_protocol::versions::v1_8_x::login::ClientboundSetCompression;
-            encode(proto, ClientboundSetCompression { threshold: VarInt(threshold) })
+            encode(
+                proto,
+                ClientboundSetCompression {
+                    threshold: VarInt(threshold),
+                },
+            )
         },
         CanonicalVersion::V1_12_2 => {
             use kojacoord_protocol::versions::v1_12_x::login::ClientboundSetCompression;
-            encode(proto, ClientboundSetCompression { threshold: VarInt(threshold) })
+            encode(
+                proto,
+                ClientboundSetCompression {
+                    threshold: VarInt(threshold),
+                },
+            )
         },
         CanonicalVersion::V1_16_5 => {
             use kojacoord_protocol::versions::v1_16_x::login::ClientboundSetCompression;
-            encode(proto, ClientboundSetCompression { threshold: VarInt(threshold) })
+            encode(
+                proto,
+                ClientboundSetCompression {
+                    threshold: VarInt(threshold),
+                },
+            )
         },
         CanonicalVersion::V1_19_4 => {
             use kojacoord_protocol::versions::v1_19_x::login::ClientboundSetCompression;
-            encode(proto, ClientboundSetCompression { threshold: VarInt(threshold) })
+            encode(
+                proto,
+                ClientboundSetCompression {
+                    threshold: VarInt(threshold),
+                },
+            )
         },
         CanonicalVersion::V1_20_4 => {
             use kojacoord_protocol::versions::v1_20_x::login::ClientboundSetCompression;
-            encode(proto, ClientboundSetCompression { threshold: VarInt(threshold) })
+            encode(
+                proto,
+                ClientboundSetCompression {
+                    threshold: VarInt(threshold),
+                },
+            )
         },
         CanonicalVersion::V1_21 => {
             use kojacoord_protocol::versions::v1_21_x::login::ClientboundSetCompression;
-            encode(proto, ClientboundSetCompression { threshold: VarInt(threshold) })
+            encode(
+                proto,
+                ClientboundSetCompression {
+                    threshold: VarInt(threshold),
+                },
+            )
         },
     }
 }
@@ -502,10 +532,7 @@ pub fn build_backend_handshake(
 /// properties; 1.20.5/1.21 may add strict-error-handling). Centralising
 /// it here keeps the per-version typed-packet imports out of
 /// connection.rs.
-pub fn skip_backend_login_success(
-    canonical: CanonicalVersion,
-    cursor: &mut bytes::Bytes,
-) {
+pub fn skip_backend_login_success(canonical: CanonicalVersion, cursor: &mut bytes::Bytes) {
     use kojacoord_protocol::codec::Decode;
     match canonical {
         CanonicalVersion::V1_6_4 | CanonicalVersion::V1_7_10 => {
@@ -592,4 +619,3 @@ pub fn build_backend_login_start(
     // V1_6_4: no LoginStart packet (pre-netty has Handshake-with-username).
     None
 }
-

@@ -322,8 +322,7 @@ impl<'a> LimboHandler<'a> {
         let threshold = self.compression_threshold;
 
         // 1. Client → proxy: ServerboundLoginAcknowledged.
-        let expected_login_ack =
-            crate::packet_ids::sb_login(proto, "ServerboundLoginAcknowledged");
+        let expected_login_ack = crate::packet_ids::sb_login(proto, "ServerboundLoginAcknowledged");
         let raw = crate::packet_io::read_packet(&mut *self.stream, threshold).await?;
         let mut cursor = raw;
         let pkt_id = VarInt::decode(&mut cursor)
@@ -354,18 +353,11 @@ impl<'a> LimboHandler<'a> {
         ClientboundFinishConfiguration {}
             .encode(&mut body)
             .map_err(ConnectionError::Protocol)?;
-        crate::packet_io::write_typed_packet(
-            &mut *self.stream,
-            id_finish,
-            &body,
-            proto,
-            threshold,
-        )
-        .await?;
+        crate::packet_io::write_typed_packet(&mut *self.stream, id_finish, &body, proto, threshold)
+            .await?;
 
         // 3. Client → proxy: ServerboundAcknowledgeFinishConfiguration.
-        let expected_ack =
-            crate::packet_ids::sb_config(proto, "AcknowledgeFinishConfiguration");
+        let expected_ack = crate::packet_ids::sb_config(proto, "AcknowledgeFinishConfiguration");
         let raw = crate::packet_io::read_packet(&mut *self.stream, threshold).await?;
         let mut cursor = raw;
         let pkt_id = VarInt::decode(&mut cursor)

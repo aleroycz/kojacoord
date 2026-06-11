@@ -68,7 +68,10 @@ pub async fn resolve_mojang_uuid(username: &str) -> Result<Uuid, MojangLookupErr
         return Err(MojangLookupError::NotFound(username.to_string()));
     }
 
-    let url = format!("https://api.mojang.com/users/profiles/minecraft/{}", trimmed);
+    let url = format!(
+        "https://api.mojang.com/users/profiles/minecraft/{}",
+        trimmed
+    );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(4))
         .user_agent("kojacoord-proxy/1.0 (Mojang UUID lookup)")
@@ -101,8 +104,8 @@ pub async fn resolve_mojang_uuid(username: &str) -> Result<Uuid, MojangLookupErr
         return Err(MojangLookupError::NotFound(trimmed.to_string()));
     }
 
-    let parsed: MojangProfileLookup = serde_json::from_str(&body)
-        .map_err(|e| MojangLookupError::Parse(e.to_string()))?;
+    let parsed: MojangProfileLookup =
+        serde_json::from_str(&body).map_err(|e| MojangLookupError::Parse(e.to_string()))?;
 
     // Re-insert the hyphens. Mojang's wire format is the canonical
     // hyphen-stripped form `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`.

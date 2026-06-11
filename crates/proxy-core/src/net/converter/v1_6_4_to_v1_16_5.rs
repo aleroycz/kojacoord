@@ -12,21 +12,21 @@ use crate::converter::ConversionResult;
 // `v1_6_4_to_v1_12_2.rs` fixed in lock-step: PLAYER_POS_LOOK was 0x13
 // (= Packet19EntityAction) and HELD_ITEM_CHANGE was 0x09 (= Packet9
 // Respawn). Correct values:
-const V164_S2C_KEEP_ALIVE: u8 = 0x00;       // Packet0KeepAlive
-const V164_S2C_CHAT: u8 = 0x03;             // Packet3Chat
-const V164_S2C_PLAYER_POS_LOOK: u8 = 0x0D;  // Packet13PlayerLookMove (was 0x13)
-const V164_S2C_SPAWN_PLAYER: u8 = 0x14;     // Packet20NamedEntitySpawn
-const V164_S2C_ENTITY_TELEPORT: u8 = 0x18;  // Packet24EntityTeleport
-const V164_S2C_ENTITY_REL_MOVE: u8 = 0x15;  // Packet21EntityRelativeMove
-const V164_S2C_ENTITY: u8 = 0x1E;           // Packet30Entity
-const V164_S2C_BLOCK_CHANGE: u8 = 0x35;     // Packet53BlockChange
-const V164_S2C_SET_SLOT: u8 = 0x67;         // Packet103SetSlot
-const V164_S2C_WINDOW_ITEMS: u8 = 0x68;     // Packet104WindowItems
+const V164_S2C_KEEP_ALIVE: u8 = 0x00; // Packet0KeepAlive
+const V164_S2C_CHAT: u8 = 0x03; // Packet3Chat
+const V164_S2C_PLAYER_POS_LOOK: u8 = 0x0D; // Packet13PlayerLookMove (was 0x13)
+const V164_S2C_SPAWN_PLAYER: u8 = 0x14; // Packet20NamedEntitySpawn
+const V164_S2C_ENTITY_TELEPORT: u8 = 0x18; // Packet24EntityTeleport
+const V164_S2C_ENTITY_REL_MOVE: u8 = 0x15; // Packet21EntityRelativeMove
+const V164_S2C_ENTITY: u8 = 0x1E; // Packet30Entity
+const V164_S2C_BLOCK_CHANGE: u8 = 0x35; // Packet53BlockChange
+const V164_S2C_SET_SLOT: u8 = 0x67; // Packet103SetSlot
+const V164_S2C_WINDOW_ITEMS: u8 = 0x68; // Packet104WindowItems
 const V164_S2C_ENTITY_EQUIPMENT: u8 = 0x1C; // Packet28EntityEquipment
-const V164_S2C_EXPERIENCE: u8 = 0x2B;       // Packet43Experience
+const V164_S2C_EXPERIENCE: u8 = 0x2B; // Packet43Experience
 const V164_S2C_HELD_ITEM_CHANGE: u8 = 0x10; // Packet16BlockItemSwitch (was 0x09)
 const V164_S2C_PLAYER_ABILITIES: u8 = 0x43; // Packet67PlayerAbilities
-const V164_S2C_DISCONNECT: u8 = 0xFF;       // Packet255KickDisconnect
+const V164_S2C_DISCONNECT: u8 = 0xFF; // Packet255KickDisconnect
 
 const V165_S2C_KEEP_ALIVE: u8 = 0x1F;
 const V165_S2C_CHAT: u8 = 0x0E;
@@ -517,24 +517,24 @@ fn s2c_disconnect(mut body: Bytes) -> ConversionResult {
 // packets. The converter silently passed 1.6.4 chat and movement c2s
 // through unconverted, and the 1.16.5 backend dropped them as
 // malformed.
-const V164_C2S_KEEP_ALIVE: u8 = 0x00;          // Packet0KeepAlive
-const V164_C2S_CHAT: u8 = 0x03;                // Packet3Chat (was 0x01)
-const V164_C2S_USE_ENTITY: u8 = 0x07;          // Packet7UseEntity
-const V164_C2S_PLAYER_ON_GROUND: u8 = 0x0A;    // Packet10Flying
-const V164_C2S_MOVE_PLAYER_POS: u8 = 0x0B;     // Packet11PlayerPosition
-const V164_C2S_MOVE_PLAYER_ROT: u8 = 0x0C;     // Packet12PlayerLook
-const V164_C2S_PLAYER_POS_LOOK: u8 = 0x0D;     // Packet13PlayerLookMove (was 0x05)
-const V164_C2S_PLAYER_DIGGING: u8 = 0x0E;      // Packet14BlockDig
+const V164_C2S_KEEP_ALIVE: u8 = 0x00; // Packet0KeepAlive
+const V164_C2S_CHAT: u8 = 0x03; // Packet3Chat (was 0x01)
+const V164_C2S_USE_ENTITY: u8 = 0x07; // Packet7UseEntity
+const V164_C2S_PLAYER_ON_GROUND: u8 = 0x0A; // Packet10Flying
+const V164_C2S_MOVE_PLAYER_POS: u8 = 0x0B; // Packet11PlayerPosition
+const V164_C2S_MOVE_PLAYER_ROT: u8 = 0x0C; // Packet12PlayerLook
+const V164_C2S_PLAYER_POS_LOOK: u8 = 0x0D; // Packet13PlayerLookMove (was 0x05)
+const V164_C2S_PLAYER_DIGGING: u8 = 0x0E; // Packet14BlockDig
 const V164_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x0F; // Packet15Place
-const V164_C2S_HELD_ITEM_CHANGE: u8 = 0x10;    // Packet16BlockItemSwitch
-const V164_C2S_ANIMATION: u8 = 0x12;           // Packet18Animation
-const V164_C2S_ENTITY_ACTION: u8 = 0x13;       // Packet19EntityAction
-const V164_C2S_CLIENT_COMMAND: u8 = 0x16;      // Packet22ClientCommand
-const V164_C2S_CLOSE_WINDOW: u8 = 0x65;        // Packet101CloseWindow
-const V164_C2S_UPDATE_SIGN: u8 = 0x82;         // Packet130UpdateSign
-const V164_C2S_PLAYER_ABILITIES: u8 = 0xCA;    // PacketCAPlayerAbilities
-const V164_C2S_CLIENT_SETTINGS: u8 = 0xCC;     // PacketCCSettings
-const V164_C2S_PLUGIN_MESSAGE: u8 = 0xFA;      // PacketFAPluginMessage
+const V164_C2S_HELD_ITEM_CHANGE: u8 = 0x10; // Packet16BlockItemSwitch
+const V164_C2S_ANIMATION: u8 = 0x12; // Packet18Animation
+const V164_C2S_ENTITY_ACTION: u8 = 0x13; // Packet19EntityAction
+const V164_C2S_CLIENT_COMMAND: u8 = 0x16; // Packet22ClientCommand
+const V164_C2S_CLOSE_WINDOW: u8 = 0x65; // Packet101CloseWindow
+const V164_C2S_UPDATE_SIGN: u8 = 0x82; // Packet130UpdateSign
+const V164_C2S_PLAYER_ABILITIES: u8 = 0xCA; // PacketCAPlayerAbilities
+const V164_C2S_CLIENT_SETTINGS: u8 = 0xCC; // PacketCCSettings
+const V164_C2S_PLUGIN_MESSAGE: u8 = 0xFA; // PacketFAPluginMessage
 
 // Per `v1_16_5_to_v1_12_2.rs` sibling table + BungeeCord `Protocol.java::
 // TO_SERVER` mappings for `MINECRAFT_1_16_2` (proto 751+ which 754 inherits).
@@ -836,12 +836,7 @@ fn c2s_update_sign(mut body: Bytes) -> ConversionResult {
     let pos = kojacoord_protocol::types::Position { x, y, z };
     let packed = kojacoord_protocol::types::encode_legacy_position(pos);
 
-    let mut lines: [String; 4] = [
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-    ];
+    let mut lines: [String; 4] = [String::new(), String::new(), String::new(), String::new()];
     for line in lines.iter_mut() {
         if body.remaining() < 2 {
             break;

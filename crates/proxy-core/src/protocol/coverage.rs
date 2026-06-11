@@ -314,9 +314,9 @@ impl ProtocolCoverage {
                         .coverage
                         .get(&(from, to))
                         .is_none_or(|s| *s == CoverageStatus::Missing)
-                    {
-                        missing.push((from, to));
-                    }
+                {
+                    missing.push((from, to));
+                }
             }
         }
         missing
@@ -341,9 +341,9 @@ impl ProtocolCoverage {
                         .canonical_coverage
                         .get(&(from, to))
                         .is_none_or(|s| *s == CoverageStatus::Missing)
-                    {
-                        missing.push((from, to));
-                    }
+                {
+                    missing.push((from, to));
+                }
             }
         }
         missing
@@ -389,12 +389,14 @@ impl ProtocolCoverage {
     /// versions that diverged on the wire (e.g. 1.20.2's configuration
     /// phase split V1_20 internally).
     pub fn canonical_coverage_percentage(&self) -> f64 {
-        let all_canonical = [CanonicalVersion::V1_6_4,
+        let all_canonical = [
+            CanonicalVersion::V1_6_4,
             CanonicalVersion::V1_7_10,
             CanonicalVersion::V1_8,
             CanonicalVersion::V1_12_2,
             CanonicalVersion::V1_16_5,
-            CanonicalVersion::V1_20_4];
+            CanonicalVersion::V1_20_4,
+        ];
 
         let total = all_canonical.len() * (all_canonical.len() - 1);
         let complete = self

@@ -127,7 +127,10 @@ impl Default for TpsTracker {
     }
 }
 
-type HotReloadMessage = (std::path::PathBuf, std::collections::HashMap<String, String>);
+type HotReloadMessage = (
+    std::path::PathBuf,
+    std::collections::HashMap<String, String>,
+);
 type HotReloadReceiver = tokio::sync::mpsc::UnboundedReceiver<HotReloadMessage>;
 
 pub struct ProxyState {

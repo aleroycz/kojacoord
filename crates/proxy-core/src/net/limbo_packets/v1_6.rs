@@ -178,7 +178,9 @@ mod tests {
         const PROTO: u32 = 78;
         let v = V1_6;
 
-        let jg = v.join_game(PROTO, "kojacoord:limbo").expect("JoinGame must build");
+        let jg = v
+            .join_game(PROTO, "kojacoord:limbo")
+            .expect("JoinGame must build");
         assert_eq!(jg.id, 0x01, "Packet1Login id");
 
         let sp = v
@@ -204,10 +206,17 @@ mod tests {
         assert_eq!(uh.id, 0x08, "Packet8UpdateHealth id");
         assert_eq!(uh.body.len(), 10, "f32 + i16 + f32");
 
-        let pa = v.player_abilities(PROTO).expect("PlayerAbilities must build");
-        assert_eq!(pa.id, 0xCA, "Packet202PlayerAbilities id (decimal 202 = 0xCA)");
+        let pa = v
+            .player_abilities(PROTO)
+            .expect("PlayerAbilities must build");
+        assert_eq!(
+            pa.id, 0xCA,
+            "Packet202PlayerAbilities id (decimal 202 = 0xCA)"
+        );
 
-        let hic = v.held_item_change(PROTO).expect("HeldItemChange must build");
+        let hic = v
+            .held_item_change(PROTO)
+            .expect("HeldItemChange must build");
         assert_eq!(hic.id, 0x10, "Packet16BlockItemSwitch id");
 
         let pp = v

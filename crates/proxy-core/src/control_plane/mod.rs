@@ -619,12 +619,11 @@ impl ControlPlaneServer {
 
         if config.tls_enabled {
             if let (Some(cert_path), Some(key_path)) = (config.tls_cert_path, config.tls_key_path) {
-                let tls_config = ServerTlsConfig::new().identity(
-                    tonic::transport::Identity::from_pem(
+                let tls_config =
+                    ServerTlsConfig::new().identity(tonic::transport::Identity::from_pem(
                         std::fs::read(&cert_path).unwrap_or_default(),
                         std::fs::read(&key_path).unwrap_or_default(),
-                    ),
-                );
+                    ));
                 builder = builder.tls_config(tls_config).unwrap();
             }
         }

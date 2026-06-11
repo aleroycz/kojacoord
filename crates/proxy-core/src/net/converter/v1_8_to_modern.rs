@@ -417,9 +417,11 @@ fn c2s_settings_to_1_12(body: Bytes) -> ConversionResult {
 /// legacy packer) and minecraft.wiki Data_types §Position which notes
 /// "the position type was different before 1.14".
 fn pack_position(x: i32, y: i32, z: i32) -> i64 {
-    kojacoord_protocol::types::encode_legacy_position(
-        kojacoord_protocol::types::Position { x, y, z },
-    )
+    kojacoord_protocol::types::encode_legacy_position(kojacoord_protocol::types::Position {
+        x,
+        y,
+        z,
+    })
 }
 
 #[cfg(test)]

@@ -775,8 +775,7 @@ impl ClientConnection {
                 let plaintext = crate::packet_builder::plaintext_from_chat_json(reason_json);
                 let pkt = ClientboundLoginDisconnect { reason: plaintext };
                 let mut body = BytesMut::new();
-                pkt.encode(&mut body)
-                    .map_err(ConnectionError::Protocol)?;
+                pkt.encode(&mut body).map_err(ConnectionError::Protocol)?;
                 let mut frame = BytesMut::new();
                 frame.put_u8(0xFF);
                 frame.extend_from_slice(&body);
@@ -1230,7 +1229,7 @@ impl ClientConnection {
         //
         //  2. Pre-netty 1.6.x login → no Mojang auth, no skin. **Load**
         //     the cached profile by username (the only key 1.6.x sends)
-         //     and graft the cached signed property in so downstream
+        //     and graft the cached signed property in so downstream
         //     limbo/relay code can synthesise the skin.
         //
         // Online-mode signature verification only runs when the proxy
@@ -1839,7 +1838,8 @@ impl ClientConnection {
         // `send_set_compression_with_threshold`.
         let proto = self.protocol_version;
         let canonical = nearest(proto).canonical_typed_packet_version();
-        if let Some(pkt) = crate::login_packets::build_play_disconnect(canonical, proto, reason_json)
+        if let Some(pkt) =
+            crate::login_packets::build_play_disconnect(canonical, proto, reason_json)
         {
             self.write_raw_login_packet(pkt).await
         } else {
@@ -1981,10 +1981,7 @@ impl ClientConnection {
         let mut backend = limbo.run().await?;
         // Route through the failover-aware path so a downed primary
         // gets transparently swapped for its currently-active standby.
-        let selected_server = self
-            .state
-            .route_via_failover(Some(self.addr.ip()))
-            .await;
+        let selected_server = self.state.route_via_failover(Some(self.addr.ip())).await;
         let mode = self.effective_forwarding_mode(
             selected_server
                 .as_ref()

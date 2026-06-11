@@ -199,8 +199,7 @@ async fn main() -> anyhow::Result<()> {
     // is what the client will render verbatim. Single quotes inside
     // values are JSON-safe.
     let shutdown_reason =
-        r#"{"text":"Proxy is restarting, Please try again later.","color":"yellow"}"#
-            .to_string();
+        r#"{"text":"Proxy is restarting, Please try again later.","color":"yellow"}"#.to_string();
 
     let accept_fut = kojacoord_proxy_core::proxy::accept_loop(state);
 

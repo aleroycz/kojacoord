@@ -259,7 +259,7 @@ const PRE_NETTY: &[Entry] = &[
         ProtocolState::Login,
         Direction::Serverbound,
         "ServerboundPingRequest",
-        0xFE
+        0xFE,
     ),
     (
         78,
