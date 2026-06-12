@@ -247,7 +247,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     shutdown_state.shutdown_gracefully(&shutdown_reason).await;
-    result
+
+    // Forceful exit. After `shutdown_gracefully` returns, every
+    // connection task has either flushed its Disconnect and dropped,
+    // or has missed the 1.5s flush window. Background tasks (failover
+    // monitor, MOTD refresh, etc.) are detached and would otherwise
+    // keep the tokio runtime alive forever; `std::process::exit`
+    // bypasses the runtime's "wait for all tasks" drop semantics.
+    // The exit code mirrors whatever `accept_loop` produced — Ok → 0,
+    // Err → 1.
+    let exit_code = if result.is_ok() { 0 } else { 1 };
+    tracing::info!(exit_code, "Proxy exiting");
+    std::process::exit(exit_code);
 }
 
 fn save_config(config: &kojacoord_config::ProxyConfig, path: &str) -> anyhow::Result<()> {

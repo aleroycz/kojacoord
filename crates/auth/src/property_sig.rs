@@ -60,11 +60,22 @@ pub fn parse_mojang_public_key(key_str: &str) -> Result<RsaPublicKey, PropertySi
     // base64-decoded uniformly. `pkcs8::DecodePublicKey::from_public_key_pem`
     // would handle headered input too but the default config carries the
     // header-less form.
+    //
+    // Additionally drop *all* whitespace AND `=` padding bytes — the
+    // string in `default_config.toml` is wrapped with embedded
+    // whitespace/newlines from TOML's triple-quoted literal, and the
+    // base64 decoder rejects `=` characters anywhere except as a tail
+    // pad (offset 735 = the `=` inside the inline TOML key). We strip
+    // padding entirely and use `STANDARD_NO_PAD` semantics via the
+    // `Indifferent` engine to side-step that whole class of error.
     let payload: String = trimmed
         .lines()
         .filter(|line| !line.starts_with("-----"))
         .collect::<Vec<_>>()
-        .join("");
+        .join("")
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '=')
+        .collect();
     let der = B64
         .decode(payload.as_bytes())
         .map_err(|e| PropertySigError::Base64("mojang_public_key", e.to_string()))?;

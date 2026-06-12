@@ -193,6 +193,26 @@ pub struct ProxyState {
     /// Failover manager for active-passive backend groups
     pub failover_manager: Arc<FailoverManager>,
 
+    /// Broadcast trigger for graceful shutdown. Every connection task
+    /// (handshake, login, limbo, relay) watches this and gets a wake
+    /// the moment the proxy starts shutting down. Receivers then
+    /// flush a Disconnect packet with the proxy's restart message and
+    /// drop the socket cleanly — without it, players see "End of
+    /// stream" instead of the configured shutdown reason.
+    ///
+    /// `tokio::sync::Notify` is chosen over a broadcast channel
+    /// because we don't need to carry any payload — the reason
+    /// string is identical for every kick and lives in
+    /// `shutdown_reason` below. Notified tasks read that field.
+    ///
+    /// Polled via `shutdown_notify.notified()` inside `tokio::select!`
+    /// branches alongside the normal I/O futures.
+    pub shutdown_notify: Arc<tokio::sync::Notify>,
+
+    /// Disconnect reason JSON to send during graceful shutdown. Set
+    /// once at startup; tasks read it after `shutdown_notify` fires.
+    pub shutdown_reason: Arc<arc_swap::ArcSwap<String>>,
+
     /// Pre-built JSON suffix for status responses, regenerated every second.
     pub cached_status: arc_swap::ArcSwap<CachedStatus>,
 
@@ -507,6 +527,11 @@ impl ProxyState {
             plugin_channel_rate_limiter,
             player_metrics,
             failover_manager,
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            shutdown_reason: Arc::new(arc_swap::ArcSwap::new(Arc::new(
+                r#"{"text":"Proxy is restarting, Please try again later.","color":"yellow"}"#
+                    .to_string(),
+            ))),
             cached_status: arc_swap::ArcSwap::new(Arc::new(CachedStatus {
                 suffix:
                     r#"},"players":{"max":0,"online":0,"sample":[]},"description":{"text":""}}"#
@@ -724,20 +749,55 @@ impl ProxyState {
             sessions = total,
             "Graceful shutdown: notifying every connected player"
         );
-        // Collect UUIDs first so we don't hold a DashMap shard lock
-        // across `kick_player`'s `.await`s (which themselves take
-        // session locks). `kick_player` removes nothing; the writer
-        // task drops the session when the socket closes.
+
+        // Publish the reason so every connection task picks up the
+        // same text, then notify them all at once. Each task is
+        // responsible for writing its own Disconnect packet because
+        // only the task knows the right wire format (pre-netty vs
+        // modern, compression threshold, current state — Login vs
+        // Play vs Configuration). This is the only correct way to
+        // kick a player who's still in the login/limbo phase, since
+        // those connections have no entry in `self.outbound`.
+        self.shutdown_reason
+            .store(Arc::new(reason_json.to_string()));
+        self.shutdown_notify.notify_waiters();
+
+        // Best-effort outbound channel push for any player who DID
+        // make it past limbo into the relay phase — the relay's
+        // notify watcher will also write a disconnect, but pushing
+        // through `outbound` covers the case where the writer is
+        // currently parked on the queue and not on a `select!`.
         let uuids: Vec<Uuid> = self.sessions.iter().map(|e| *e.key()).collect();
         for uuid in &uuids {
             self.kick_player(uuid, reason_json).await;
         }
-        // Brief flush window — the outbound queue is async, and a
-        // bare-return would race the runtime drop and lose the
-        // disconnect packets we just queued. 500ms is empirically
-        // enough for the writer to drain on a healthy socket; failing
-        // sockets time out within the same window via TCP's RST path.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Drain window: tasks need time to flush their socket buffer
+        // before we let the runtime shut down. 1500ms is enough for
+        // a TCP write+flush+FIN on any healthy socket; failing
+        // sockets get the RST path within the same window.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        // Players are out — now unload plugins. Order matters: we
+        // wait until the connection tasks have flushed their
+        // disconnect packets BEFORE we tear down plugins, because
+        // plugins may be holding plugin-channel registrations the
+        // s2c disconnect flush would otherwise route through. Once
+        // sockets are closed the plugins have no live connections
+        // left to serve and can shut down cleanly.
+        //
+        // `unload_all` calls each plugin's `on_disable` → `on_unload`
+        // in sequence; we hold the write lock through the whole
+        // sweep so no late `dispatch_plugin_event` can race against
+        // an already-disabled plugin.
+        {
+            let mut mgr = self
+                .plugin_manager
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            tracing::warn!("Graceful shutdown: calling on_disable / on_unload on all plugins");
+            mgr.unload_all();
+        }
         tracing::warn!(notified = total, "Graceful shutdown notification complete");
     }
 

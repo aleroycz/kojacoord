@@ -29,6 +29,7 @@ pub mod versions;
 pub use codec::{read_packet, write_packet, Decode, DecodeVer, Encode, EncodeVer, PacketId};
 pub use dimension_codec::{
     dimension_codec_nbt, dimension_codec_nbt_1_20_4, dimension_type_nbt, dimension_type_nbt_1_20_4,
+    dimension_type_nbt_for_proto,
 };
 pub use error::ProtocolError;
 pub use negotiation::{

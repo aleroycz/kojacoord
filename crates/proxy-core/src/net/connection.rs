@@ -901,22 +901,41 @@ impl ClientConnection {
         //   * 1.6: 0xFE 0x01 0xFA [u16-be channel len] "MC|PingHost"
         //          [u16-be payload len] [u8 proto] [u16-be host len UCS-2]
         //          [host bytes] [i32 port]
-        // Reading these bytes before writing the response matters
-        // because the 1.6 client expects a tidy TCP exchange — it
-        // sends the request as one block and waits for the response.
-        // If we write back before it's done sending, on Windows
-        // (where the user reported the issue) the kernel raises an
-        // RST and the client never sees the MOTD.
         //
-        // We tolerate truncated reads silently — older clients legitimately
-        // stop mid-payload depending on which subform they speak.
+        // We MUST drain ALL pending request bytes before writing the
+        // response and closing. If unread bytes are sitting in the
+        // receive buffer when we close, the OS (especially Windows)
+        // sends a TCP RST instead of FIN — the client then sees
+        // "Connection error" rather than the MOTD we already wrote.
+        //
+        // Strategy: read in a loop with a 250ms-per-chunk timeout
+        // until either (a) we hit EOF, (b) the chunk timeout fires
+        // (client is done sending), or (c) we've drained over the
+        // upper bound a 1.6 extended request can legally produce
+        // (~512 bytes is generous; a typical request is ~36 bytes
+        // plus the hostname).
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut throwaway = [0u8; 256];
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_millis(50),
-            self.stream.read(&mut throwaway),
-        )
-        .await;
+        let mut drained_total = 0usize;
+        loop {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(250),
+                self.stream.read(&mut throwaway),
+            )
+            .await
+            {
+                Ok(Ok(0)) => break, // EOF
+                Ok(Ok(n)) => {
+                    drained_total += n;
+                    if drained_total >= 1024 {
+                        break; // upper-bound safety
+                    }
+                },
+                Ok(Err(_)) => break, // socket error — treat as drained
+                Err(_) => break,     // timeout — client done sending
+            }
+        }
+        tracing::trace!(drained = drained_total, "drained 1.6 SLP request bytes");
 
         let cached = self.state.cached_status.load();
         // `cached.suffix` already supplies the closing brace of the outer
@@ -937,6 +956,13 @@ impl ClientConnection {
             .await
             .map_err(ConnectionError::Io)?;
         self.stream.flush().await.map_err(ConnectionError::Io)?;
+
+        // Hand the client a moment to drain its receive buffer before
+        // we close. Without this on Windows the OS occasionally raises
+        // RST mid-read because we're closing the socket too fast after
+        // the write. 50ms is empirically enough; the Notchian client
+        // closes its end well before then.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         tracing::debug!(
             response_bytes = response.len(),
@@ -1720,15 +1746,30 @@ impl ClientConnection {
         // packet the 1.6.4 client cannot parse (it reads the leading
         // length VarInt as a garbage packet id and disconnects).
         if matches!(canonical, CanonicalVersion::V1_6_4) {
+            // Pre-netty's analogue of LoginSuccess + JoinGame is the
+            // single Packet1Login. The 1.6 client treats this as both
+            // "auth complete" and "spawn in the world", so the values
+            // we set here are what limbo would otherwise have to
+            // overwrite — we use the limbo defaults (flat, spectator)
+            // directly instead of bouncing through two Packet1Login
+            // frames in a row.
+            //
+            // Wire shape per HexaCord `Packet1Login::write`:
+            //   `[0x01][entity_id i32][level_type UCS-2][gamemode u8]`
+            //   `[dimension i8][difficulty u8][world_height u8][max_players u8]`
+            // No length VarInt, no packet-id VarInt, no compression.
             use kojacoord_protocol::codec::Encode;
             use kojacoord_protocol::versions::v1_6_x::login::LoginRequestS2C;
             let pkt = LoginRequestS2C {
                 entity_id: 0,
-                level_type: "default".to_string(),
-                game_mode: 0,
+                level_type: "flat".to_string(),
+                game_mode: 3, // spectator — no inventory, no damage
                 dimension: 0,
                 difficulty: 0,
-                world_height: 250,
+                // `world_height` is the "unused" byte field per HexaCord's
+                // `Packet1Login`. The 1.6.4 client never reads it; sending
+                // 0 keeps the wire frame minimal.
+                world_height: 0,
                 max_players: 20,
             };
             let mut wire = BytesMut::new();

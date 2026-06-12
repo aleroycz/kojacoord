@@ -144,9 +144,27 @@ impl Decode for ClientboundPlayerPosition {
     }
 }
 
+/// Pre-netty (1.6.x) **HeldItemChange** — `Packet16BlockItemSwitch` in
+/// HexaCord / Notchian MCP + ProtocolSupport's
+/// `clientbound game_v_1_5_2::PacketHeldItemChange`.
+///
+/// CRITICAL: the wire field is a **Short (i16, 2 bytes)**, not a Byte.
+/// Notchian's `Packet16BlockItemSwitch::readPacketData` calls
+/// `input.readShort()`. ProtocolSupport's encoder writes
+/// `buf.writeShort(slot)`. The legacy item-id range went up to 65535
+/// (potions / mob spawners use IDs > 127), so the wire shape was sized
+/// for short even though server-side modern slot indices are 0-8.
+///
+/// A previous 1-byte encoding here desynced the entire downstream
+/// packet stream by 1 byte — the 1.6.4 client would consume our next
+/// packet's leading byte as the high half of `slotId`, then read every
+/// subsequent packet at an offset of 1, eventually hitting a Short
+/// field with a tiny `maxLen` (e.g. `Packet25Painting.title` with
+/// `readString(in, 13)`) and disconnecting with
+/// `"String length longer than maximum allowed (NNNNN > 13)"`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClientboundHeldItemChange {
-    pub slot: i8,
+    pub slot: i16,
 }
 
 impl PacketId for ClientboundHeldItemChange {
@@ -157,7 +175,7 @@ impl PacketId for ClientboundHeldItemChange {
 
 impl Encode for ClientboundHeldItemChange {
     fn encode(&self, dst: &mut BytesMut) -> Result<(), ProtocolError> {
-        dst.put_i8(self.slot);
+        dst.put_i16(self.slot);
         Ok(())
     }
 }
@@ -165,7 +183,9 @@ impl Encode for ClientboundHeldItemChange {
 impl Decode for ClientboundHeldItemChange {
     fn decode(src: &mut Bytes) -> Result<Self, ProtocolError> {
         need(src, 2)?;
-        Ok(Self { slot: src.get_i8() })
+        Ok(Self {
+            slot: src.get_i16(),
+        })
     }
 }
 
@@ -285,74 +305,6 @@ impl Decode for ClientboundRespawn {
             gamemode,
             world_height,
             level_type,
-        })
-    }
-}
-
-/// Pre-netty (1.6.x) **LoginRequest** — `Packet1Login` in HexaCord /
-/// KettleCord and ProtocolSupport's `clientbound login_v_1_5_2`.
-/// Sent by the server immediately after the login handshake to drop
-/// the client into the world; the 1.6 client treats this as the
-/// equivalent of `JoinGame` for modern protocols.
-///
-/// Without this packet the 1.6.4 client sits indefinitely after
-/// successful login and eventually times out — that's why
-/// `limbo_packets/v1_6.rs::join_game` previously returned `None` and
-/// 1.6 clients only ever saw a stale login screen.
-///
-/// Wire shape (verified against HexaCord `Packet1Login.java::write`):
-///   `[i32 entity_id] [UCS-2 String level_type (max 16)] [i8 gamemode]`
-///   `[i8 dimension] [i8 difficulty] [u8 world_height (always 0)]`
-///   `[u8 max_players]`
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClientboundLoginRequest {
-    pub entity_id: i32,
-    pub level_type: String,
-    pub gamemode: i8,
-    pub dimension: i8,
-    pub difficulty: i8,
-    pub world_height: u8,
-    pub max_players: u8,
-}
-
-impl PacketId for ClientboundLoginRequest {
-    fn packet_id(ver: u32) -> u8 {
-        crate::registry::cb_play(ver, "ClientboundLoginRequest")
-    }
-}
-
-impl Encode for ClientboundLoginRequest {
-    fn encode(&self, dst: &mut BytesMut) -> Result<(), ProtocolError> {
-        dst.put_i32(self.entity_id);
-        encode_legacy_string(&self.level_type, dst);
-        dst.put_i8(self.gamemode);
-        dst.put_i8(self.dimension);
-        dst.put_i8(self.difficulty);
-        dst.put_u8(self.world_height);
-        dst.put_u8(self.max_players);
-        Ok(())
-    }
-}
-
-impl Decode for ClientboundLoginRequest {
-    fn decode(src: &mut Bytes) -> Result<Self, ProtocolError> {
-        need(src, 4)?;
-        let entity_id = src.get_i32();
-        let level_type = decode_legacy_string(src)?;
-        need(src, 1 + 1 + 1 + 1 + 1)?;
-        let gamemode = src.get_i8();
-        let dimension = src.get_i8();
-        let difficulty = src.get_i8();
-        let world_height = src.get_u8();
-        let max_players = src.get_u8();
-        Ok(Self {
-            entity_id,
-            level_type,
-            gamemode,
-            dimension,
-            difficulty,
-            world_height,
-            max_players,
         })
     }
 }
@@ -478,56 +430,6 @@ impl Decode for ClientboundUpdateHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Regression: the wire shape of `ClientboundLoginRequest` matches
-    /// HexaCord `Packet1Login`. Encode-then-decode must round-trip, and
-    /// the encoded byte length must equal the expected sum of fields.
-    #[test]
-    fn login_request_round_trip() {
-        let original = ClientboundLoginRequest {
-            entity_id: 1234,
-            level_type: "flat".to_string(),
-            gamemode: 3,
-            dimension: 0,
-            difficulty: 0,
-            world_height: 0,
-            max_players: 20,
-        };
-        let mut buf = BytesMut::new();
-        original.encode(&mut buf).unwrap();
-
-        //   4 (entity_id)
-        // + 2 + 4 * 2 (level_type "flat" UCS-2: 2-byte length prefix
-        //              + 4 chars × 2 bytes per char)
-        // + 1 + 1 + 1 + 1 + 1 (gamemode/dimension/difficulty/world_height/max_players)
-        assert_eq!(buf.len(), 4 + 2 + 4 * 2 + 5, "wire size mismatch");
-
-        let mut bytes = buf.freeze();
-        let decoded = ClientboundLoginRequest::decode(&mut bytes).unwrap();
-        assert_eq!(decoded, original);
-        // Nothing left over — every byte was consumed.
-        assert_eq!(bytes.remaining(), 0);
-    }
-
-    /// First field of the encoded LoginRequest MUST be the entity_id
-    /// (Int, BE), NOT the level_type. Catches a class of regression
-    /// where someone reorders the encode statements.
-    #[test]
-    fn login_request_entity_id_is_first_field() {
-        let pkt = ClientboundLoginRequest {
-            entity_id: 0x42,
-            level_type: "flat".to_string(),
-            gamemode: 0,
-            dimension: 0,
-            difficulty: 0,
-            world_height: 0,
-            max_players: 0,
-        };
-        let mut buf = BytesMut::new();
-        pkt.encode(&mut buf).unwrap();
-        // 0x00000042 BE = [0x00, 0x00, 0x00, 0x42]
-        assert_eq!(&buf[..4], &[0x00, 0x00, 0x00, 0x42]);
-    }
 
     /// SpawnPosition is exactly 12 bytes (3 × i32 BE) and round-trips.
     #[test]

@@ -12,16 +12,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write     # required to dispatch release.yml below
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Bump workspace version
+        id: bump
+        shell: bash
         run: |
-          # Skip if last commit was already a version bump
+          set -euo pipefail
+          # Skip if last commit was already a version bump (the rebuild
+          # would otherwise infinite-loop).
           if git log -1 --pretty=%B | grep -q "chore: bump version"; then
             echo "Already bumped, skipping"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -32,14 +39,49 @@ jobs:
           PATCH=$(echo "$CURRENT" | cut -d. -f3)
           NEW_PATCH=$((PATCH + 1))
           NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+          NEW_TAG="v$NEW_VERSION"
 
           # Update [workspace.package] version
           sed -i "s/^version = \"$CURRENT\"/version = \"$NEW_VERSION\"/" Cargo.toml
 
-          # Git config + commit
+          # Git config + commit + tag
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml
           git commit -m "chore: bump version to $NEW_VERSION"
-          git tag "v$NEW_VERSION"
+          git tag "$NEW_TAG"
           git push origin HEAD:${{ github.ref_name }} --tags
+
+          echo "bumped=true"           >> "$GITHUB_OUTPUT"
+          echo "version=$NEW_VERSION"  >> "$GITHUB_OUTPUT"
+          echo "tag=$NEW_TAG"          >> "$GITHUB_OUTPUT"
+
+      # GitHub Actions deliberately does NOT trigger downstream
+      # workflows from `push` events authored by `GITHUB_TOKEN` (per
+      # https://docs.github.com/en/actions/using-workflows/triggering-a-workflow#triggering-a-workflow-from-a-workflow
+      # → "events triggered by the GITHUB_TOKEN ... will not create a
+      # new workflow run"). So our `git push` above pushes the
+      # commit + tag but `release.yml` would silently never run.
+      #
+      # The escape hatch: `workflow_dispatch` IS allowed to chain
+      # from `GITHUB_TOKEN`. Explicitly dispatch `release.yml` with
+      # the new tag so the multi-OS release pipeline picks up the
+      # bump in the same chain of events.
+      #
+      # If `release.yml` isn't in workflow_dispatch-able state (e.g.
+      # disabled, or its `on: workflow_dispatch:` was removed), this
+      # step prints the error and continues — we don't want to block
+      # the version bump on a dispatch failure.
+      - name: Dispatch release.yml on the new tag
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "Dispatching release.yml on ref ${{ steps.bump.outputs.tag }}"
+          gh workflow run release.yml \
+            --ref "${{ steps.bump.outputs.tag }}" \
+            --repo "${{ github.repository }}"
+          echo "Release workflow dispatched — check the Actions tab for progress."

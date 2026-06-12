@@ -492,6 +492,603 @@ fn c2s_player_block_placement(mut body: Bytes) -> ConversionResult {
     ConversionResult::Converted(vec![build_payload(V164_C2S_PLAYER_BLOCK_PLACEMENT, &out)])
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// SERVERBOUND-TO-CLIENT (s2c): 1.12.2 backend packets → 1.6.4 client
+// ═══════════════════════════════════════════════════════════════════
+//
+// Sourced against:
+//   * BungeeCord `Protocol.java::TO_CLIENT` proto 340 (1.12.2 ids)
+//   * HexaCord / KettleCord pre-netty Packet<N><Name>.java (1.6.4 ids)
+//   * minecraft.wiki Java_Edition_protocol/Packets per-version pages
+//
+// Packets the 1.6.4 client cannot render at all (post-1.6 additions:
+// SetCooldown, UnlockRecipes, Advancements, WorldBorder, Camera, etc.)
+// are explicitly dropped rather than passed through — the 1.6.4 client
+// would reject the unknown packet id and disconnect with "Bad packet id".
+
+// ---- 1.12.2 source ids (s2c, per BungeeCord proto 340) ----
+const V112_S2C_SPAWN_PLAYER: u8 = 0x05;
+const V112_S2C_BLOCK_CHANGE: u8 = 0x0B;
+const V112_S2C_CHAT: u8 = 0x0F;
+const V112_S2C_PLUGIN_MESSAGE: u8 = 0x18;
+const V112_S2C_DISCONNECT: u8 = 0x1A;
+const V112_S2C_KEEP_ALIVE: u8 = 0x1F;
+const V112_S2C_JOIN_GAME: u8 = 0x23;
+const V112_S2C_ENTITY: u8 = 0x25;
+const V112_S2C_ENTITY_REL_MOVE: u8 = 0x26;
+const V112_S2C_ENTITY_LOOK_REL_MOVE: u8 = 0x27;
+const V112_S2C_ENTITY_LOOK: u8 = 0x28;
+const V112_S2C_PLAYER_ABILITIES: u8 = 0x2C;
+const V112_S2C_PLAYER_POS_LOOK: u8 = 0x2F;
+const V112_S2C_DESTROY_ENTITIES: u8 = 0x32;
+const V112_S2C_RESPAWN: u8 = 0x35;
+const V112_S2C_ENTITY_HEAD_LOOK: u8 = 0x36;
+const V112_S2C_HELD_ITEM_CHANGE: u8 = 0x3A;
+const V112_S2C_ENTITY_EQUIPMENT: u8 = 0x3F;
+const V112_S2C_SET_EXPERIENCE: u8 = 0x40;
+const V112_S2C_UPDATE_HEALTH: u8 = 0x41;
+const V112_S2C_SPAWN_POSITION: u8 = 0x46;
+const V112_S2C_TIME_UPDATE: u8 = 0x47;
+const V112_S2C_COLLECT_ITEM: u8 = 0x4B;
+const V112_S2C_ENTITY_TELEPORT: u8 = 0x4C;
+
+// ---- 1.6.4 target ids (s2c, MCP-doc decimal = hex) ----
+const V164_S2C_KEEP_ALIVE: u8 = 0x00;
+const V164_S2C_LOGIN_REQUEST: u8 = 0x01;
+const V164_S2C_CHAT: u8 = 0x03;
+const V164_S2C_TIME_UPDATE: u8 = 0x04;
+const V164_S2C_ENTITY_EQUIPMENT: u8 = 0x05;
+const V164_S2C_SPAWN_POSITION: u8 = 0x06;
+const V164_S2C_UPDATE_HEALTH: u8 = 0x08;
+const V164_S2C_RESPAWN: u8 = 0x09;
+const V164_S2C_PLAYER_POS_LOOK: u8 = 0x0D;
+const V164_S2C_HELD_ITEM_CHANGE: u8 = 0x10;
+const V164_S2C_SPAWN_PLAYER: u8 = 0x14;
+const V164_S2C_COLLECT_ITEM: u8 = 0x16;
+const V164_S2C_DESTROY_ENTITIES: u8 = 0x1D;
+const V164_S2C_ENTITY: u8 = 0x1E;
+const V164_S2C_ENTITY_REL_MOVE: u8 = 0x1F;
+const V164_S2C_ENTITY_LOOK: u8 = 0x20;
+const V164_S2C_ENTITY_LOOK_REL_MOVE: u8 = 0x21;
+const V164_S2C_ENTITY_TELEPORT: u8 = 0x22;
+const V164_S2C_ENTITY_HEAD_LOOK: u8 = 0x23;
+const V164_S2C_BLOCK_CHANGE: u8 = 0x35;
+const V164_S2C_SET_EXPERIENCE: u8 = 0x2B;
+const V164_S2C_PLAYER_ABILITIES: u8 = 0xCA;
+const V164_S2C_PLUGIN_MESSAGE: u8 = 0xFA;
+const V164_S2C_DISCONNECT: u8 = 0xFF;
+
+pub fn convert_s2c(payload: Bytes) -> ConversionResult {
+    let Some((id, body)) = split_id(payload.clone()) else {
+        return ConversionResult::Passthrough;
+    };
+    match id {
+        V112_S2C_KEEP_ALIVE => s2c_keep_alive(body),
+        V112_S2C_JOIN_GAME => s2c_join_game(body),
+        V112_S2C_CHAT => s2c_chat(body),
+        V112_S2C_TIME_UPDATE => s2c_time_update(body),
+        V112_S2C_SPAWN_POSITION => s2c_spawn_position(body),
+        V112_S2C_UPDATE_HEALTH => s2c_update_health(body),
+        V112_S2C_RESPAWN => s2c_respawn(body),
+        V112_S2C_PLAYER_POS_LOOK => s2c_player_pos_look(body),
+        V112_S2C_HELD_ITEM_CHANGE => s2c_held_item_change(body),
+        V112_S2C_PLAYER_ABILITIES => s2c_player_abilities(body),
+        V112_S2C_DISCONNECT => s2c_disconnect(body),
+        V112_S2C_PLUGIN_MESSAGE => s2c_plugin_message(body),
+        V112_S2C_BLOCK_CHANGE => s2c_block_change(body),
+        V112_S2C_SPAWN_PLAYER => s2c_spawn_player(body),
+        V112_S2C_ENTITY => s2c_entity(body),
+        V112_S2C_ENTITY_REL_MOVE => s2c_entity_rel_move(body),
+        V112_S2C_ENTITY_LOOK => s2c_entity_look(body),
+        V112_S2C_ENTITY_LOOK_REL_MOVE => s2c_entity_look_rel_move(body),
+        V112_S2C_ENTITY_TELEPORT => s2c_entity_teleport(body),
+        V112_S2C_ENTITY_HEAD_LOOK => s2c_entity_head_look(body),
+        V112_S2C_DESTROY_ENTITIES => s2c_destroy_entities(body),
+        V112_S2C_COLLECT_ITEM => s2c_collect_item(body),
+        V112_S2C_ENTITY_EQUIPMENT => s2c_entity_equipment(body),
+        V112_S2C_SET_EXPERIENCE => s2c_set_experience(body),
+        // Drop post-1.6 additions that have no pre-netty equivalent.
+        // The 1.6.4 client would disconnect on the unknown id.
+        0x07 | 0x17 | 0x1B | 0x1D | 0x29 | 0x2B | 0x2D | 0x2E | 0x31 | 0x33 | 0x34 | 0x37
+        | 0x38 | 0x39 | 0x3D | 0x42 | 0x43 | 0x44 | 0x45 | 0x48 | 0x4A | 0x4D | 0x4E | 0x4F => {
+            ConversionResult::Drop
+        },
+        _ => ConversionResult::Passthrough,
+    }
+}
+
+/// 1.12.2 KeepAlive s2c: i64 id. 1.6.4 KeepAlive s2c: i32 id.
+fn s2c_keep_alive(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 8 {
+        return ConversionResult::Passthrough;
+    }
+    let id = body.get_i64() as i32;
+    let mut out = BytesMut::new();
+    out.put_i32(id);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_KEEP_ALIVE, &out)])
+}
+
+/// 1.12.2 JoinGame → 1.6.4 Packet1Login (`LoginRequestS2C`).
+///
+/// 1.12.2 layout: `[i32 entity_id][u8 gamemode][i32 dimension]`
+/// `[u8 difficulty][u8 max_players][String level_type][bool reduced_debug]`.
+/// 1.6.4 Packet1Login: `[i32 entity_id][UCS-2 level_type][i8 gamemode]`
+/// `[i8 dimension][i8 difficulty][u8 world_height][u8 max_players]`.
+///
+/// Fields are reordered: level_type moves to position 2 (was 5).
+fn s2c_join_game(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 4 + 1 + 4 + 1 + 1 {
+        return ConversionResult::Passthrough;
+    }
+    let entity_id = body.get_i32();
+    let gamemode = body.get_u8();
+    let dimension = body.get_i32() as i8; // 1.6 stores dimension as i8
+    let difficulty = body.get_u8();
+    let max_players = body.get_u8();
+    let Ok(level_type) = String::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id);
+    encode_legacy_string(&level_type, &mut out);
+    out.put_i8(gamemode as i8);
+    out.put_i8(dimension);
+    out.put_i8(difficulty as i8);
+    out.put_u8(0); // world_height — unused in 1.6.4
+    out.put_u8(max_players);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_LOGIN_REQUEST, &out)])
+}
+
+/// 1.12.2 Chat s2c: `[VarInt-String json][i8 position]`.
+/// 1.6.4 Chat s2c: `[UCS-2 String json]` (no position).
+/// Position byte is dropped — 1.6.4 only had the chat-line slot.
+fn s2c_chat(mut body: Bytes) -> ConversionResult {
+    let Ok(json) = String::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let mut out = BytesMut::new();
+    encode_legacy_string(&json, &mut out);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_CHAT, &out)])
+}
+
+/// 1.12.2 TimeUpdate: `[i64 world_age][i64 time_of_day]`.
+/// 1.6.4 TimeUpdate: same shape.
+fn s2c_time_update(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 16 {
+        return ConversionResult::Passthrough;
+    }
+    let world_age = body.get_i64();
+    let time_of_day = body.get_i64();
+    let mut out = BytesMut::new();
+    out.put_i64(world_age);
+    out.put_i64(time_of_day);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_TIME_UPDATE, &out)])
+}
+
+/// 1.12.2 SpawnPosition: `[i64 packed Position]`.
+/// 1.6.4 SpawnPosition: `[i32 x][i32 y][i32 z]`.
+fn s2c_spawn_position(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 8 {
+        return ConversionResult::Passthrough;
+    }
+    let packed = body.get_i64();
+    let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
+    let mut out = BytesMut::new();
+    out.put_i32(pos.x);
+    out.put_i32(pos.y);
+    out.put_i32(pos.z);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SPAWN_POSITION, &out)])
+}
+
+/// 1.12.2 UpdateHealth: `[f32 health][VarInt food][f32 saturation]`.
+/// 1.6.4 UpdateHealth: `[f32 health][i16 food][f32 saturation]`.
+fn s2c_update_health(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 4 {
+        return ConversionResult::Passthrough;
+    }
+    let health = body.get_f32();
+    let Ok(food) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    if body.remaining() < 4 {
+        return ConversionResult::Passthrough;
+    }
+    let saturation = body.get_f32();
+    let mut out = BytesMut::new();
+    out.put_f32(health);
+    out.put_i16(food.0 as i16);
+    out.put_f32(saturation);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_UPDATE_HEALTH, &out)])
+}
+
+/// 1.12.2 Respawn: `[i32 dimension][u8 difficulty][u8 gamemode][String level_type]`.
+/// 1.6.4 Respawn: `[i32 dimension][i8 difficulty][i8 gamemode][i16 world_height][UCS-2 level_type]`.
+fn s2c_respawn(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 4 + 1 + 1 {
+        return ConversionResult::Passthrough;
+    }
+    let dimension = body.get_i32();
+    let difficulty = body.get_u8();
+    let gamemode = body.get_u8();
+    let Ok(level_type) = String::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let mut out = BytesMut::new();
+    out.put_i32(dimension);
+    out.put_i8(difficulty as i8);
+    out.put_i8(gamemode as i8);
+    out.put_i16(256); // standard world_height for 1.6.4
+    encode_legacy_string(&level_type, &mut out);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_RESPAWN, &out)])
+}
+
+/// 1.12.2 PlayerPositionAndLook: `[f64 x][f64 y][f64 z][f32 yaw][f32 pitch][i8 flags][VarInt teleport_id]`.
+/// 1.6.4 PlayerPositionLook: `[f64 x][f64 stance][f64 y][f64 z][f32 yaw][f32 pitch][bool on_ground]`.
+/// stance is synthesised as y + 1.62; teleport_id is dropped (1.6 had no ack);
+/// `flags` (relative-position bitfield) is collapsed to absolute by assuming
+/// flags=0 — modern servers nearly always emit absolute coords during normal play.
+fn s2c_player_pos_look(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 8 * 3 + 4 * 2 + 1 {
+        return ConversionResult::Passthrough;
+    }
+    let x = body.get_f64();
+    let y = body.get_f64();
+    let z = body.get_f64();
+    let yaw = body.get_f32();
+    let pitch = body.get_f32();
+    let _flags = body.get_i8();
+    let _teleport_id = VarInt::decode(&mut body);
+    let mut out = BytesMut::new();
+    out.put_f64(x);
+    out.put_f64(y + 1.62); // stance
+    out.put_f64(y);
+    out.put_f64(z);
+    out.put_f32(yaw);
+    out.put_f32(pitch);
+    out.put_u8(1); // on_ground = true
+    ConversionResult::Converted(vec![build_payload(V164_S2C_PLAYER_POS_LOOK, &out)])
+}
+
+/// 1.12.2 HeldItemChange s2c: `[i8 slot]`.
+/// 1.6.4 HeldItemChange s2c: `[i16 slot]` (per HexaCord `Packet16BlockItemSwitch`).
+fn s2c_held_item_change(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 1 {
+        return ConversionResult::Passthrough;
+    }
+    let slot = body.get_i8();
+    let mut out = BytesMut::new();
+    out.put_i16(slot as i16);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_HELD_ITEM_CHANGE, &out)])
+}
+
+/// 1.12.2 PlayerAbilities: `[i8 flags][f32 fly_speed][f32 walk_speed]`.
+/// 1.6.4 PlayerAbilities: same shape.
+fn s2c_player_abilities(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 1 + 4 + 4 {
+        return ConversionResult::Passthrough;
+    }
+    let flags = body.get_i8();
+    let fly_speed = body.get_f32();
+    let walk_speed = body.get_f32();
+    let mut out = BytesMut::new();
+    out.put_i8(flags);
+    out.put_f32(fly_speed);
+    out.put_f32(walk_speed);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_PLAYER_ABILITIES, &out)])
+}
+
+/// 1.12.2 Disconnect: `[VarInt-String json]`.
+/// 1.6.4 Disconnect (Packet255Kick): `[UCS-2 String reason]`. 1.6.x DOES
+/// parse the reason as JSON (Mojang added MessageComponentSerializer in 1.6),
+/// so passing the JSON straight through is correct.
+fn s2c_disconnect(mut body: Bytes) -> ConversionResult {
+    let Ok(reason) = String::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let mut out = BytesMut::new();
+    encode_legacy_string(&reason, &mut out);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_DISCONNECT, &out)])
+}
+
+/// 1.12.2 PluginMessage: `[VarInt-String channel][bytes data (remaining)]`.
+/// 1.6.4 PluginMessage: `[UCS-2 channel][i16 data_len][bytes data]`.
+/// 1.6.4 channel uses the legacy `MC|<name>` naming; 1.12.2's
+/// `minecraft:<name>` channels are translated where the mapping is
+/// obvious, else passed through verbatim (1.6.4 silently drops
+/// unrecognised channels, which is fine).
+fn s2c_plugin_message(mut body: Bytes) -> ConversionResult {
+    let Ok(channel) = String::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let legacy_channel = match channel.as_str() {
+        "minecraft:brand" => "MC|Brand".to_owned(),
+        other => other.to_owned(),
+    };
+    let data = body.to_vec();
+    if data.len() > i16::MAX as usize {
+        return ConversionResult::Drop; // 1.6.4 caps i16 data_len
+    }
+    let mut out = BytesMut::new();
+    encode_legacy_string(&legacy_channel, &mut out);
+    out.put_i16(data.len() as i16);
+    out.put_slice(&data);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_PLUGIN_MESSAGE, &out)])
+}
+
+/// 1.12.2 BlockChange: `[i64 packed Position][VarInt block_state]`.
+/// 1.6.4 BlockChange: `[i32 x][u8 y][i32 z][i16 block_id][u8 metadata]`.
+/// Block state collapse: modern global-palette id is split into legacy
+/// `(block_id, metadata)` via the flattening table — we only handle the
+/// "passthrough" fallback here (assume block_state fits in i16 and
+/// metadata=0). Real flattening lives in `chunk_repack`; chunk packets
+/// route through that instead.
+fn s2c_block_change(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 8 {
+        return ConversionResult::Passthrough;
+    }
+    let packed = body.get_i64();
+    let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
+    let Ok(state) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let block_id = (state.0 >> 4).clamp(0, i16::MAX as i32) as i16;
+    let metadata = (state.0 & 0xF) as u8;
+    let mut out = BytesMut::new();
+    out.put_i32(pos.x);
+    out.put_u8(pos.y as u8);
+    out.put_i32(pos.z);
+    out.put_i16(block_id);
+    out.put_u8(metadata);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_BLOCK_CHANGE, &out)])
+}
+
+/// 1.12.2 SpawnPlayer: `[VarInt entity_id][UUID player_uuid][f64 x][f64 y][f64 z]`
+/// `[u8 yaw][u8 pitch][Metadata]`.
+/// 1.6.4 NamedEntitySpawn: `[i32 entity_id][UCS-2 username][i32 x_fp32][i32 y_fp32]`
+/// `[i32 z_fp32][i8 yaw][i8 pitch][i16 held_item][Metadata]`.
+/// We synthesise username from UUID prefix (the proxy doesn't have the
+/// real name here without an entity-name registry); held_item=0 (empty).
+/// Modern Metadata format is incompatible — we stub it as the terminator
+/// byte 0x7F so the 1.6.4 client doesn't read garbage.
+fn s2c_spawn_player(mut body: Bytes) -> ConversionResult {
+    let Ok(entity_id) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    if body.remaining() < 16 + 8 * 3 + 1 + 1 {
+        return ConversionResult::Passthrough;
+    }
+    let hi = body.get_i64();
+    let lo = body.get_i64();
+    let x = body.get_f64();
+    let y = body.get_f64();
+    let z = body.get_f64();
+    let yaw = body.get_u8() as i8;
+    let pitch = body.get_u8() as i8;
+    // Drop the modern metadata blob entirely.
+    let username = format!("p_{:x}{:x}", hi as u32, lo as u32);
+
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id.0);
+    encode_legacy_string(&username, &mut out);
+    out.put_i32((x * 32.0) as i32);
+    out.put_i32((y * 32.0) as i32);
+    out.put_i32((z * 32.0) as i32);
+    out.put_i8(yaw);
+    out.put_i8(pitch);
+    out.put_i16(0); // held_item = empty hand
+    out.put_u8(0x7F); // metadata terminator
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SPAWN_PLAYER, &out)])
+}
+
+/// 1.12.2 Entity (no-move heartbeat): `[VarInt entity_id]`.
+/// 1.6.4 Entity: `[i32 entity_id]`.
+fn s2c_entity(mut body: Bytes) -> ConversionResult {
+    let Ok(entity_id) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id.0);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY, &out)])
+}
+
+/// 1.12.2 EntityRelativeMove: `[VarInt eid][i16 dx][i16 dy][i16 dz][bool on_ground]`.
+/// 1.6.4 EntityRelativeMove: `[i32 eid][i8 dx][i8 dy][i8 dz]`.
+/// 1.12.2 deltas are in fp(4096) units, 1.6.4 in fp(32). Convert by /128.
+fn s2c_entity_rel_move(mut body: Bytes) -> ConversionResult {
+    let Ok(entity_id) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    if body.remaining() < 2 * 3 + 1 {
+        return ConversionResult::Passthrough;
+    }
+    let dx = (body.get_i16() / 128) as i8;
+    let dy = (body.get_i16() / 128) as i8;
+    let dz = (body.get_i16() / 128) as i8;
+    let _og = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id.0);
+    out.put_i8(dx);
+    out.put_i8(dy);
+    out.put_i8(dz);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_REL_MOVE, &out)])
+}
+
+/// 1.12.2 EntityLook: `[VarInt eid][u8 yaw][u8 pitch][bool on_ground]`.
+/// 1.6.4 EntityLook: `[i32 eid][i8 yaw][i8 pitch]`.
+fn s2c_entity_look(mut body: Bytes) -> ConversionResult {
+    let Ok(entity_id) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    if body.remaining() < 3 {
+        return ConversionResult::Passthrough;
+    }
+    let yaw = body.get_u8() as i8;
+    let pitch = body.get_u8() as i8;
+    let _og = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id.0);
+    out.put_i8(yaw);
+    out.put_i8(pitch);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_LOOK, &out)])
+}
+
+/// 1.12.2 EntityLookAndRelativeMove: `[VarInt eid][i16 dx][i16 dy][i16 dz]`
+/// `[u8 yaw][u8 pitch][bool on_ground]`.
+/// 1.6.4 EntityLookAndRelativeMove: `[i32 eid][i8 dx][i8 dy][i8 dz][i8 yaw][i8 pitch]`.
+fn s2c_entity_look_rel_move(mut body: Bytes) -> ConversionResult {
+    let Ok(entity_id) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    if body.remaining() < 2 * 3 + 3 {
+        return ConversionResult::Passthrough;
+    }
+    let dx = (body.get_i16() / 128) as i8;
+    let dy = (body.get_i16() / 128) as i8;
+    let dz = (body.get_i16() / 128) as i8;
+    let yaw = body.get_u8() as i8;
+    let pitch = body.get_u8() as i8;
+    let _og = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id.0);
+    out.put_i8(dx);
+    out.put_i8(dy);
+    out.put_i8(dz);
+    out.put_i8(yaw);
+    out.put_i8(pitch);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_LOOK_REL_MOVE, &out)])
+}
+
+/// 1.12.2 EntityTeleport: `[VarInt eid][f64 x][f64 y][f64 z][u8 yaw][u8 pitch][bool og]`.
+/// 1.6.4 EntityTeleport: `[i32 eid][i32 x_fp32][i32 y_fp32][i32 z_fp32][i8 yaw][i8 pitch]`.
+fn s2c_entity_teleport(mut body: Bytes) -> ConversionResult {
+    let Ok(entity_id) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    if body.remaining() < 8 * 3 + 3 {
+        return ConversionResult::Passthrough;
+    }
+    let x = body.get_f64();
+    let y = body.get_f64();
+    let z = body.get_f64();
+    let yaw = body.get_u8() as i8;
+    let pitch = body.get_u8() as i8;
+    let _og = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id.0);
+    out.put_i32((x * 32.0) as i32);
+    out.put_i32((y * 32.0) as i32);
+    out.put_i32((z * 32.0) as i32);
+    out.put_i8(yaw);
+    out.put_i8(pitch);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_TELEPORT, &out)])
+}
+
+/// 1.12.2 EntityHeadLook: `[VarInt eid][u8 head_yaw]`.
+/// 1.6.4 EntityHeadLook: `[i32 eid][i8 head_yaw]`.
+fn s2c_entity_head_look(mut body: Bytes) -> ConversionResult {
+    let Ok(entity_id) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    if body.remaining() < 1 {
+        return ConversionResult::Passthrough;
+    }
+    let head_yaw = body.get_u8() as i8;
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id.0);
+    out.put_i8(head_yaw);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_HEAD_LOOK, &out)])
+}
+
+/// 1.12.2 DestroyEntities: `[VarInt count][N × VarInt eid]`.
+/// 1.6.4 DestroyEntities: `[i8 count][N × i32 eid]`.
+fn s2c_destroy_entities(mut body: Bytes) -> ConversionResult {
+    let Ok(count) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    if count.0 < 0 || count.0 > 127 {
+        return ConversionResult::Drop; // 1.6 can't represent >127 entities
+    }
+    let mut ids = Vec::with_capacity(count.0 as usize);
+    for _ in 0..count.0 {
+        let Ok(eid) = VarInt::decode(&mut body) else {
+            return ConversionResult::Passthrough;
+        };
+        ids.push(eid.0);
+    }
+    let mut out = BytesMut::new();
+    out.put_i8(count.0 as i8);
+    for id in ids {
+        out.put_i32(id);
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_DESTROY_ENTITIES, &out)])
+}
+
+/// 1.12.2 CollectItem: `[VarInt collected_eid][VarInt collector_eid][VarInt count]`.
+/// 1.6.4 CollectItem: `[i32 collected_eid][i32 collector_eid]` (no count field).
+fn s2c_collect_item(mut body: Bytes) -> ConversionResult {
+    let Ok(collected) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let Ok(collector) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let _count = VarInt::decode(&mut body);
+    let mut out = BytesMut::new();
+    out.put_i32(collected.0);
+    out.put_i32(collector.0);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_COLLECT_ITEM, &out)])
+}
+
+/// 1.12.2 EntityEquipment: `[VarInt eid][VarInt slot][Slot item]`.
+/// 1.6.4 EntityEquipment: `[i32 eid][i16 slot][Slot item]`.
+/// The Slot serialisation differs structurally — we Drop rather than
+/// risk a malformed Slot trailer since the 1.6.4 client refuses
+/// partial Slot reads.
+fn s2c_entity_equipment(mut body: Bytes) -> ConversionResult {
+    let Ok(entity_id) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let Ok(slot) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    // Empty slot marker is safe to forward.
+    let mut out = BytesMut::new();
+    out.put_i32(entity_id.0);
+    out.put_i16(slot.0 as i16);
+    out.put_i16(-1); // empty Slot marker
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_EQUIPMENT, &out)])
+}
+
+/// 1.12.2 SetExperience: `[f32 bar][VarInt level][VarInt total_xp]`.
+/// 1.6.4 SetExperience (Packet43): `[f32 bar][i16 level][i16 total_xp]`.
+fn s2c_set_experience(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 4 {
+        return ConversionResult::Passthrough;
+    }
+    let bar = body.get_f32();
+    let Ok(level) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let Ok(total) = VarInt::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
+    let mut out = BytesMut::new();
+    out.put_f32(bar);
+    out.put_i16(level.0.clamp(0, i16::MAX as i32) as i16);
+    out.put_i16(total.0.clamp(0, i16::MAX as i32) as i16);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SET_EXPERIENCE, &out)])
+}
+
+/// Pre-netty UCS-2 String writer (u16 BE length + UCS-2 BE chars).
+fn encode_legacy_string(s: &str, dst: &mut BytesMut) {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    dst.put_u16(units.len() as u16);
+    for u in units {
+        dst.put_u16(u);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

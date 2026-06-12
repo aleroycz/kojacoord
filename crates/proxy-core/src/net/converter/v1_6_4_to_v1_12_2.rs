@@ -665,6 +665,42 @@ const V112_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x1F;
 const V112_C2S_HELD_ITEM_CHANGE: u8 = 0x1A;
 const V112_C2S_ENTITY_ACTION: u8 = 0x15;
 
+// Additional 1.6.4 source ids for the expanded c2s coverage.
+// Per HexaCord packet table + minecraft.wiki Java_Edition_protocol §1.6.4.
+const V164_C2S_USE_ENTITY: u8 = 0x07; // Packet7UseEntity
+const V164_C2S_PLAYER: u8 = 0x0A; // Packet10Flying (on-ground only)
+const V164_C2S_PLAYER_POSITION: u8 = 0x0B; // Packet11PlayerPosition
+const V164_C2S_PLAYER_LOOK: u8 = 0x0C; // Packet12PlayerLook
+const V164_C2S_ANIMATION: u8 = 0x12; // Packet18Animation
+const V164_C2S_CLIENT_COMMAND: u8 = 0x16; // Packet22ClientCommand (respawn)
+const V164_C2S_CLOSE_WINDOW: u8 = 0x65; // Packet101CloseWindow
+const V164_C2S_CLICK_WINDOW: u8 = 0x66; // Packet102ClickWindow
+const V164_C2S_CONFIRM_TX: u8 = 0x6A; // Packet106Transaction
+const V164_C2S_UPDATE_SIGN: u8 = 0x82; // Packet130UpdateSign
+const V164_C2S_PLAYER_ABILITIES: u8 = 0xCA; // Packet202PlayerAbilities
+const V164_C2S_TAB_COMPLETE: u8 = 0xCB; // Packet203AutoComplete
+const V164_C2S_CLIENT_SETTINGS: u8 = 0xCC; // Packet204LocaleAndViewDistance
+const V164_C2S_CLIENT_STATUS: u8 = 0xCD; // Packet205ClientCommand
+const V164_C2S_PLUGIN_MESSAGE: u8 = 0xFA; // Packet250CustomPayload
+
+// 1.12.2 target ids (s2c naming for our s2c side already exists above;
+// here we add the c2s targets for the expanded coverage).
+// Additional 1.12.2 c2s target ids not in the original const block above.
+const V112_C2S_TAB_COMPLETE_OUT: u8 = 0x01;
+const V112_C2S_CLIENT_STATUS_OUT: u8 = 0x03;
+const V112_C2S_CLIENT_SETTINGS_OUT: u8 = 0x04;
+const V112_C2S_CONFIRM_TX_OUT: u8 = 0x05;
+const V112_C2S_CLICK_WINDOW_OUT: u8 = 0x07;
+const V112_C2S_CLOSE_WINDOW_OUT: u8 = 0x08;
+const V112_C2S_PLUGIN_MESSAGE_OUT: u8 = 0x09;
+const V112_C2S_USE_ENTITY_OUT: u8 = 0x0A;
+const V112_C2S_PLAYER_POSITION_OUT: u8 = 0x0C;
+const V112_C2S_PLAYER_LOOK_OUT: u8 = 0x0F;
+const V112_C2S_PLAYER_OUT: u8 = 0x0D; // Player flying (on-ground only)
+const V112_C2S_PLAYER_ABILITIES_OUT: u8 = 0x13;
+const V112_C2S_UPDATE_SIGN_OUT: u8 = 0x1C;
+const V112_C2S_ANIMATION_OUT: u8 = 0x1D;
+
 pub fn convert_c2s(payload: Bytes) -> ConversionResult {
     let Some((id, body)) = split_id(payload.clone()) else {
         return ConversionResult::Passthrough;
@@ -673,13 +709,345 @@ pub fn convert_c2s(payload: Bytes) -> ConversionResult {
     match id {
         V164_C2S_KEEP_ALIVE => c2s_keep_alive(body),
         V164_C2S_CHAT => c2s_chat(body),
+        V164_C2S_USE_ENTITY => c2s_use_entity(body),
+        V164_C2S_PLAYER => c2s_player(body),
+        V164_C2S_PLAYER_POSITION => c2s_player_position(body),
+        V164_C2S_PLAYER_LOOK => c2s_player_look(body),
         V164_C2S_PLAYER_POS_LOOK => c2s_player_pos_look(body),
         V164_C2S_PLAYER_DIGGING => c2s_player_digging(body),
         V164_C2S_PLAYER_BLOCK_PLACEMENT => c2s_player_block_placement(body),
         V164_C2S_HELD_ITEM_CHANGE => c2s_held_item_change(body),
+        V164_C2S_ANIMATION => c2s_animation(body),
         V164_C2S_ENTITY_ACTION => c2s_entity_action(body),
+        V164_C2S_CLIENT_COMMAND => c2s_client_command(body),
+        V164_C2S_CLOSE_WINDOW => c2s_close_window(body),
+        V164_C2S_CLICK_WINDOW => c2s_click_window(body),
+        V164_C2S_CONFIRM_TX => c2s_confirm_tx(body),
+        V164_C2S_UPDATE_SIGN => c2s_update_sign(body),
+        V164_C2S_PLAYER_ABILITIES => c2s_player_abilities(body),
+        V164_C2S_TAB_COMPLETE => c2s_tab_complete(body),
+        V164_C2S_CLIENT_SETTINGS => c2s_client_settings(body),
+        V164_C2S_CLIENT_STATUS => c2s_client_status(body),
+        V164_C2S_PLUGIN_MESSAGE => c2s_plugin_message(body),
         _ => ConversionResult::Passthrough,
     }
+}
+
+// ─── 1.6.4→1.12.2 c2s converters (expanded set) ────────────────────
+
+/// 1.6.4 UseEntity: `[i32 user][i32 target][i8 left_click]`.
+/// 1.12.2 UseEntity: `[VarInt target][VarInt type (0=interact,1=attack,2=interact_at)]`.
+/// We drop `user` (server knows the player's own eid), and map left_click
+/// to type=1 (attack) when true, type=0 (interact) when false.
+fn c2s_use_entity(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 9 {
+        return ConversionResult::Passthrough;
+    }
+    let _user = body.get_i32();
+    let target = body.get_i32();
+    let left_click = body.get_i8() != 0;
+    let mut out = BytesMut::new();
+    VarInt(target).encode(&mut out).ok();
+    VarInt(if left_click { 1 } else { 0 }).encode(&mut out).ok();
+    ConversionResult::Converted(vec![build_payload(V112_C2S_USE_ENTITY_OUT, &out)])
+}
+
+/// 1.6.4 Player (on-ground only): `[bool on_ground]`.
+/// 1.12.2 Player: `[bool on_ground]`. Same shape, just remap id.
+fn c2s_player(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 1 {
+        return ConversionResult::Passthrough;
+    }
+    let og = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_u8(og);
+    ConversionResult::Converted(vec![build_payload(V112_C2S_PLAYER_OUT, &out)])
+}
+
+/// 1.6.4 PlayerPosition: `[f64 x][f64 y][f64 stance][f64 z][bool on_ground]`.
+/// 1.12.2 PlayerPosition: `[f64 x][f64 feet_y][f64 z][bool on_ground]`.
+/// 1.6 had a separate stance field (eye-y); modern uses feet_y directly.
+fn c2s_player_position(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 8 * 4 + 1 {
+        return ConversionResult::Passthrough;
+    }
+    let x = body.get_f64();
+    let y = body.get_f64();
+    let _stance = body.get_f64();
+    let z = body.get_f64();
+    let og = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_f64(x);
+    out.put_f64(y);
+    out.put_f64(z);
+    out.put_u8(og);
+    ConversionResult::Converted(vec![build_payload(V112_C2S_PLAYER_POSITION_OUT, &out)])
+}
+
+/// 1.6.4 PlayerLook: `[f32 yaw][f32 pitch][bool on_ground]`.
+/// 1.12.2 PlayerLook: same shape.
+fn c2s_player_look(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 4 + 4 + 1 {
+        return ConversionResult::Passthrough;
+    }
+    let yaw = body.get_f32();
+    let pitch = body.get_f32();
+    let og = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_f32(yaw);
+    out.put_f32(pitch);
+    out.put_u8(og);
+    ConversionResult::Converted(vec![build_payload(V112_C2S_PLAYER_LOOK_OUT, &out)])
+}
+
+/// 1.6.4 Animation: `[i32 entity_id][i8 animation]`.
+/// 1.12.2 Animation: `[VarInt hand]`. The 1.6 packet covered entity
+/// animations including swing (animation=1), and the server's modern
+/// equivalent only takes a hand id (0=main, 1=off). Map any animation
+/// to hand=0 (main hand); 1.12 doesn't model the other 1.6 animations
+/// (eat food, leave bed, crit, magic-crit) as c2s.
+fn c2s_animation(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 5 {
+        return ConversionResult::Passthrough;
+    }
+    let _eid = body.get_i32();
+    let _anim = body.get_i8();
+    let mut out = BytesMut::new();
+    VarInt(0).encode(&mut out).ok();
+    ConversionResult::Converted(vec![build_payload(V112_C2S_ANIMATION_OUT, &out)])
+}
+
+/// 1.6.4 ClientCommand (Packet22ClientCommand, id 0x16): `[i8 payload]`
+/// — payload=1 means "respawn". 1.12.2 ClientStatus (0x03): `[VarInt
+/// action]` — 0=respawn, 1=open-inv-achievement.
+fn c2s_client_command(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 1 {
+        return ConversionResult::Passthrough;
+    }
+    let _payload = body.get_i8();
+    // Treat any client-command as respawn (the only payload value 1.6.4
+    // actually emits is 1 = respawn from the death screen).
+    let mut out = BytesMut::new();
+    VarInt(0).encode(&mut out).ok();
+    ConversionResult::Converted(vec![build_payload(V112_C2S_CLIENT_STATUS_OUT, &out)])
+}
+
+/// 1.6.4 CloseWindow: `[u8 window_id]`. 1.12.2 CloseWindow: same shape.
+fn c2s_close_window(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 1 {
+        return ConversionResult::Passthrough;
+    }
+    let id = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_u8(id);
+    ConversionResult::Converted(vec![build_payload(V112_C2S_CLOSE_WINDOW_OUT, &out)])
+}
+
+/// 1.6.4 ClickWindow (Packet102WindowClick): `[u8 win_id][i16 slot]`
+/// `[i8 button][i16 action_number][i8 mode][Slot item]`.
+/// 1.12.2 ClickWindow: `[u8 win_id][i16 slot][i8 button][i16 action_number]`
+/// `[VarInt mode][Slot item]`. Modern serialises `mode` as VarInt,
+/// legacy as i8 — same value range, just re-encode.
+/// We drop the trailing Slot to avoid a wire-format mismatch — the
+/// server re-syncs from its own inventory snapshot anyway.
+fn c2s_click_window(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 1 + 2 + 1 + 2 + 1 {
+        return ConversionResult::Passthrough;
+    }
+    let win_id = body.get_u8();
+    let slot = body.get_i16();
+    let button = body.get_i8();
+    let action = body.get_i16();
+    let mode = body.get_i8();
+    let mut out = BytesMut::new();
+    out.put_u8(win_id);
+    out.put_i16(slot);
+    out.put_i8(button);
+    out.put_i16(action);
+    VarInt(mode as i32).encode(&mut out).ok();
+    out.put_i16(-1); // empty Slot
+    ConversionResult::Converted(vec![build_payload(V112_C2S_CLICK_WINDOW_OUT, &out)])
+}
+
+/// 1.6.4 ConfirmTransaction (Packet106): `[u8 win_id][i16 action][bool accepted]`.
+/// 1.12.2 ConfirmTransaction: same shape.
+fn c2s_confirm_tx(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 4 {
+        return ConversionResult::Passthrough;
+    }
+    let win_id = body.get_u8();
+    let action = body.get_i16();
+    let accepted = body.get_u8();
+    let mut out = BytesMut::new();
+    out.put_u8(win_id);
+    out.put_i16(action);
+    out.put_u8(accepted);
+    ConversionResult::Converted(vec![build_payload(V112_C2S_CONFIRM_TX_OUT, &out)])
+}
+
+/// 1.6.4 UpdateSign: `[i32 x][i16 y][i32 z][4× UCS-2 line]`.
+/// 1.12.2 UpdateSign: `[i64 packed Position][4× String line]`.
+fn c2s_update_sign(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 4 + 2 + 4 {
+        return ConversionResult::Passthrough;
+    }
+    let x = body.get_i32();
+    let y = body.get_i16() as i32;
+    let z = body.get_i32();
+    let mut lines: Vec<String> = Vec::with_capacity(4);
+    for _ in 0..4 {
+        if body.remaining() < 2 {
+            return ConversionResult::Passthrough;
+        }
+        let len = body.get_u16() as usize;
+        if body.remaining() < len * 2 {
+            return ConversionResult::Passthrough;
+        }
+        let mut units = Vec::with_capacity(len);
+        for _ in 0..len {
+            units.push(body.get_u16());
+        }
+        lines.push(String::from_utf16(&units).unwrap_or_default());
+    }
+    let packed =
+        kojacoord_protocol::types::encode_legacy_position(kojacoord_protocol::Position { x, y, z });
+    let mut out = BytesMut::new();
+    out.put_i64(packed as i64);
+    for line in &lines {
+        let bytes = line.as_bytes();
+        VarInt(bytes.len() as i32).encode(&mut out).ok();
+        out.put_slice(bytes);
+    }
+    ConversionResult::Converted(vec![build_payload(V112_C2S_UPDATE_SIGN_OUT, &out)])
+}
+
+/// 1.6.4 PlayerAbilities (c2s): `[i8 flags][f32 fly][f32 walk]`.
+/// 1.12.2 PlayerAbilities (c2s): `[i8 flags][f32 fly][f32 walk]`. Same.
+fn c2s_player_abilities(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 9 {
+        return ConversionResult::Passthrough;
+    }
+    let flags = body.get_i8();
+    let fly = body.get_f32();
+    let walk = body.get_f32();
+    let mut out = BytesMut::new();
+    out.put_i8(flags);
+    out.put_f32(fly);
+    out.put_f32(walk);
+    ConversionResult::Converted(vec![build_payload(V112_C2S_PLAYER_ABILITIES_OUT, &out)])
+}
+
+/// 1.6.4 TabComplete: `[UCS-2 text]`.
+/// 1.12.2 TabComplete: `[String text][bool assume_command][bool has_pos][?i64 pos]`.
+fn c2s_tab_complete(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 2 {
+        return ConversionResult::Passthrough;
+    }
+    let len = body.get_u16() as usize;
+    if body.remaining() < len * 2 {
+        return ConversionResult::Passthrough;
+    }
+    let mut units = Vec::with_capacity(len);
+    for _ in 0..len {
+        units.push(body.get_u16());
+    }
+    let text = String::from_utf16(&units).unwrap_or_default();
+    let mut out = BytesMut::new();
+    let bytes = text.as_bytes();
+    VarInt(bytes.len() as i32).encode(&mut out).ok();
+    out.put_slice(bytes);
+    out.put_u8(0); // assume_command = false
+    out.put_u8(0); // has_pos = false
+    ConversionResult::Converted(vec![build_payload(V112_C2S_TAB_COMPLETE_OUT, &out)])
+}
+
+/// 1.6.4 LocaleAndViewDistance (0xCC): `[UCS-2 locale][i8 view_distance]`
+/// `[i8 chat_flags][i8 difficulty][bool show_cape]`.
+/// chat_flags is a bitfield: bits 0-2 chat_visibility, bit 3 colors.
+/// 1.12.2 ClientSettings (0x04): `[String locale][i8 view_distance]`
+/// `[VarInt chat_mode][bool chat_colors][u8 skin_parts][VarInt main_hand]`.
+fn c2s_client_settings(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 2 {
+        return ConversionResult::Passthrough;
+    }
+    let len = body.get_u16() as usize;
+    if body.remaining() < len * 2 {
+        return ConversionResult::Passthrough;
+    }
+    let mut units = Vec::with_capacity(len);
+    for _ in 0..len {
+        units.push(body.get_u16());
+    }
+    let locale = String::from_utf16(&units).unwrap_or_default();
+    if body.remaining() < 4 {
+        return ConversionResult::Passthrough;
+    }
+    let view_distance = body.get_i8();
+    let chat_flags = body.get_i8();
+    let difficulty = body.get_i8();
+    let _show_cape = body.get_u8();
+
+    let chat_mode = chat_flags & 0x7;
+    let chat_colors = (chat_flags & 0x8) != 0;
+    let _ = difficulty; // 1.12 ClientSettings doesn't echo difficulty back
+
+    let mut out = BytesMut::new();
+    let bytes = locale.as_bytes();
+    VarInt(bytes.len() as i32).encode(&mut out).ok();
+    out.put_slice(bytes);
+    out.put_i8(view_distance);
+    VarInt(chat_mode as i32).encode(&mut out).ok();
+    out.put_u8(chat_colors as u8);
+    out.put_u8(0x7F); // skin_parts: all visible
+    VarInt(1).encode(&mut out).ok(); // main_hand = 1 (right)
+    ConversionResult::Converted(vec![build_payload(V112_C2S_CLIENT_SETTINGS_OUT, &out)])
+}
+
+/// 1.6.4 ClientStatus (0xCD): `[i8 status]`.
+/// 1.12.2 ClientStatus (0x03): `[VarInt action]`. Direct mapping (0=respawn,
+/// 1=open inventory achievement).
+fn c2s_client_status(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 1 {
+        return ConversionResult::Passthrough;
+    }
+    let status = body.get_i8();
+    let mut out = BytesMut::new();
+    VarInt(status as i32).encode(&mut out).ok();
+    ConversionResult::Converted(vec![build_payload(V112_C2S_CLIENT_STATUS_OUT, &out)])
+}
+
+/// 1.6.4 PluginMessage (0xFA): `[UCS-2 channel][i16 data_len][bytes data]`.
+/// 1.12.2 PluginMessage (0x09): `[String channel][bytes data]`.
+/// Channel name remapping: 1.6's `MC|<name>` legacy form → 1.13+ uses
+/// `minecraft:<name>` — but 1.12.2 still uses `MC|<name>`, so passthrough.
+fn c2s_plugin_message(mut body: Bytes) -> ConversionResult {
+    if body.remaining() < 2 {
+        return ConversionResult::Passthrough;
+    }
+    let len = body.get_u16() as usize;
+    if body.remaining() < len * 2 {
+        return ConversionResult::Passthrough;
+    }
+    let mut units = Vec::with_capacity(len);
+    for _ in 0..len {
+        units.push(body.get_u16());
+    }
+    let channel = String::from_utf16(&units).unwrap_or_default();
+    if body.remaining() < 2 {
+        return ConversionResult::Passthrough;
+    }
+    let data_len = body.get_i16().max(0) as usize;
+    if body.remaining() < data_len {
+        return ConversionResult::Passthrough;
+    }
+    let mut data = vec![0u8; data_len];
+    body.copy_to_slice(&mut data);
+    let mut out = BytesMut::new();
+    let cbytes = channel.as_bytes();
+    VarInt(cbytes.len() as i32).encode(&mut out).ok();
+    out.put_slice(cbytes);
+    out.put_slice(&data);
+    ConversionResult::Converted(vec![build_payload(V112_C2S_PLUGIN_MESSAGE_OUT, &out)])
 }
 
 fn c2s_keep_alive(mut body: Bytes) -> ConversionResult {

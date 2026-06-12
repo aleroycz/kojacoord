@@ -9,31 +9,20 @@ use super::{encode, EncodedPacket, LimboPackets, PlayerPos, SoundParams};
 pub struct V1_6;
 
 impl LimboPackets for V1_6 {
-    fn join_game(&self, proto: u32, _world_name: &str) -> Option<EncodedPacket> {
-        // Pre-netty's analogue of JoinGame is `Packet1Login`
-        // (`ClientboundLoginRequest`). Without it the 1.6 client sits
-        // on the login screen forever — confirmed via HexaCord +
-        // ProtocolSupport `clientbound login_v_1_5_2`.
+    fn join_game(&self, _proto: u32, _world_name: &str) -> Option<EncodedPacket> {
+        // Pre-netty's Packet1Login was already sent by `connection.rs`
+        // at LoginSuccess time (the 1.6 client treats Packet1Login as
+        // both LoginSuccess AND JoinGame — there's no separate
+        // play-state entry packet). Sending a second one here would
+        // make the client see two world-entry frames back-to-back;
+        // some launchers tolerate it, others reset the entity table
+        // and re-render the dirt-screen.
         //
-        // Values mirror the modern limbo defaults: entity_id = 0,
-        // level_type = "flat" (so the client doesn't try to render
-        // terrain), gamemode = 3 (spectator → no inventory / damage),
-        // dimension = 0 (overworld; pre-netty has no Identifier
-        // namespace), difficulty = 0 (peaceful), world_height = 0
-        // (unused field — HexaCord notes it isn't read by the client
-        // but the byte must still be present), max_players = 20.
-        encode(
-            proto,
-            p::ClientboundLoginRequest {
-                entity_id: 0,
-                level_type: "flat".to_string(),
-                gamemode: 3,
-                dimension: 0,
-                difficulty: 0,
-                world_height: 0,
-                max_players: 20,
-            },
-        )
+        // The post-LoginRequest essentials (SpawnPosition / TimeUpdate
+        // / UpdateHealth / PlayerAbilities / HeldItemChange /
+        // PlayerPosition) are still emitted by the per-method calls
+        // below — only the JoinGame slot is intentionally a no-op.
+        None
     }
 
     fn respawn(&self, proto: u32, _world_name: &str) -> Option<EncodedPacket> {
@@ -85,9 +74,30 @@ impl LimboPackets for V1_6 {
     }
 
     fn chat(&self, proto: u32, json_message: &str) -> Option<EncodedPacket> {
-        // 1.6.4 chat is a plain UCS-2 string, not JSON.
-        let text = crate::packet_builder::plaintext_from_chat_json(json_message);
-        encode(proto, p::ClientboundChatMessage { message: text })
+        // 1.6.x **DOES** parse chat messages as JSON.
+        //
+        // Mojang introduced `MessageComponentSerializer` (the Gson-based
+        // chat component deserialiser) in 1.6.0. The Notchian 1.6.4
+        // client's `NetClientHandler.handleChat` calls
+        // `ChatMessageComponent.func_111078_c(message)` which is
+        // `Gson.fromJson(message, ChatMessageComponent.class)` — and
+        // the deserialiser explicitly casts the root to `JsonObject`,
+        // so anything that isn't an object (a bare string, a number)
+        // triggers `ClassCastException: JsonPrimitive cannot be cast
+        // to JsonObject` and crashes the client with
+        // `Deserializing Message`.
+        //
+        // Earlier code here converted the JSON to plaintext via
+        // `plaintext_from_chat_json` on the (incorrect) belief that
+        // pre-netty used plaintext — that comment dated to 1.5.2 and
+        // never got updated when the bucket was repurposed for 1.6.
+        // Send the JSON through verbatim instead.
+        encode(
+            proto,
+            p::ClientboundChatMessage {
+                message: json_message.to_owned(),
+            },
+        )
     }
 
     fn note_sound(&self, _proto: u32, _pos: SoundParams) -> Option<EncodedPacket> {
@@ -178,10 +188,14 @@ mod tests {
         const PROTO: u32 = 78;
         let v = V1_6;
 
-        let jg = v
-            .join_game(PROTO, "kojacoord:limbo")
-            .expect("JoinGame must build");
-        assert_eq!(jg.id, 0x01, "Packet1Login id");
+        // join_game intentionally returns None for pre-netty — the
+        // Packet1Login that does the world-entry work is sent by
+        // `connection.rs::send_login_success` at LoginSuccess time,
+        // before limbo runs. See the comment on V1_6::join_game.
+        assert!(
+            v.join_game(PROTO, "kojacoord:limbo").is_none(),
+            "1.6.x limbo must not duplicate Packet1Login — connection.rs already sent it"
+        );
 
         let sp = v
             .spawn_position(

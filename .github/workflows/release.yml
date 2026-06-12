@@ -1,7 +1,36 @@
 name: Release
 
+# Three trigger paths, all funneling into the same workflow run:
+#
+#   1. push to master/main touching `Cargo.toml` — detect a version
+#      bump and (if new) create the `v<x.y.z>` tag AND run the
+#      release in the same run. This is what `tag.yml` used to do,
+#      now folded in here because pushing a tag with the default
+#      GITHUB_TOKEN does NOT trigger a separate workflow:
+#      https://docs.github.com/en/actions/using-workflows/triggering-a-workflow#triggering-a-workflow-from-a-workflow
+#      → "events triggered by the GITHUB_TOKEN ... will not create a
+#      new workflow run". That doc note is exactly why the prior
+#      tag.yml created the tag but release.yml never fired.
+#
+#   2. push of a manually-created `v*` tag — release the tagged
+#      commit. Useful for re-running a release on an existing tag.
+#
+#   3. workflow_dispatch — manual run for debugging the release
+#      pipeline without bumping the version.
 on:
   push:
+    # Two trigger shapes — a path-filtered branch push (`Cargo.toml`
+    # bump on master) AND any `v*` tag push. GitHub Actions
+    # documents this combined form at
+    # https://docs.github.com/en/actions/using-workflows/triggering-a-workflow#using-filters
+    # — a push event runs when EITHER the branches+paths filter
+    # matches OR the tags filter matches. The `detect-and-tag` job
+    # below disambiguates which arm fired.
+    branches:
+      - master
+      - main
+    paths:
+      - 'Cargo.toml'
     tags:
       - 'v*'
   workflow_dispatch:
@@ -15,8 +44,125 @@ env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
 
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
 jobs:
+  # ────────────────────────────────────────────────────────────────
+  # detect-and-tag
+  # ────────────────────────────────────────────────────────────────
+  # Resolves the release version that downstream jobs will publish:
+  #
+  #   * Tag push (`refs/tags/v1.2.3`)            → version = 1.2.3,
+  #                                                 should_release = true
+  #   * Master push with bumped Cargo.toml ver   → create `v<ver>` tag,
+  #                                                 should_release = true
+  #   * Master push with no version bump         → should_release = false,
+  #                                                 every downstream job
+  #                                                 skips via `needs.detect.outputs.should_release`
+  #   * workflow_dispatch                        → uses current Cargo.toml
+  #                                                 version, doesn't tag
+  detect-and-tag:
+    name: Detect version and tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      should_release: ${{ steps.resolve.outputs.should_release }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history + tags so the version detector can compare
+          # against existing tags without an extra `git fetch --tags`.
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Trigger arm 2: tag push.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              VERSION="${GITHUB_REF#refs/tags/v}"
+              echo "Tag push detected: v${VERSION}"
+              echo "version=${VERSION}"        >> "$GITHUB_OUTPUT"
+              echo "tag=v${VERSION}"           >> "$GITHUB_OUTPUT"
+              echo "should_release=true"       >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+
+          # Read [workspace.package].version from Cargo.toml.
+          VERSION=$(awk '
+              /^\[workspace\.package\]/ { in_section=1; next }
+              in_section && /^\[/        { in_section=0 }
+              in_section && /^version[[:space:]]*=/ {
+                  match($0, /"[^"]+"/);
+                  v=substr($0, RSTART+1, RLENGTH-2);
+                  print v; exit
+              }
+          ' Cargo.toml)
+          if [ -z "${VERSION}" ]; then
+              echo "::error::Could not parse workspace version from Cargo.toml"
+              exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "Workspace version: ${VERSION}"
+
+          # Trigger arm 3: manual dispatch.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+              echo "Manual dispatch — using current Cargo.toml version, no tag push."
+              echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+              echo "tag=${TAG}"           >> "$GITHUB_OUTPUT"
+              echo "should_release=true"  >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+
+          # Trigger arm 1: master push touching Cargo.toml. Check if
+          # the version is actually new — re-pushes of the same
+          # version are a no-op (someone touched Cargo.toml for an
+          # unrelated reason).
+          if git rev-parse "${TAG}" >/dev/null 2>&1 \
+             || git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+              echo "Tag ${TAG} already exists — version was not bumped, no release."
+              echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+              echo "tag=${TAG}"           >> "$GITHUB_OUTPUT"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+
+          echo "New version ${VERSION} detected — will tag and release."
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"           >> "$GITHUB_OUTPUT"
+          echo "should_release=true"  >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        # Only when we just decided to release AND we weren't already on
+        # a tag push (which would mean the tag already exists).
+        if: |
+          steps.resolve.outputs.should_release == 'true'
+          && !startsWith(github.ref, 'refs/tags/v')
+          && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${VERSION} (auto-tagged from $(git rev-parse --short HEAD))"
+          git push origin "${TAG}"
+          echo "Pushed ${TAG}. Release jobs below will publish artifacts for it."
+
   build-release:
+    needs: detect-and-tag
+    if: needs.detect-and-tag.outputs.should_release == 'true'
     name: Build Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -94,10 +240,9 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: build-release
+    needs: [detect-and-tag, build-release]
     runs-on: ubuntu-latest
-    # Only publish a GitHub Release for tag pushes; manual dispatch just builds.
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.detect-and-tag.outputs.should_release == 'true'
     permissions:
       contents: write
       id-token: write
@@ -120,7 +265,10 @@ jobs:
 
       - name: Extract version from tag
         id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        # Pulled from `detect-and-tag` rather than `${GITHUB_REF}` —
+        # on master-push runs the ref is `refs/heads/master`, not the
+        # `v<x.y.z>` tag; the detect job has the canonical version.
+        run: echo "VERSION=${{ needs.detect-and-tag.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       # Build the changelog for THIS tag only (commits since the previous tag),
       # grouped by Conventional Commit type via cliff.toml.
@@ -151,7 +299,7 @@ jobs:
           set -euo pipefail
           if [ ! -s CHANGES.md ]; then
               echo "git-cliff produced no output — falling back to raw git log."
-              PREV_TAG="$(git describe --tags --abbrev=0 --exclude="${{ github.ref_name }}" 2>/dev/null || true)"
+              PREV_TAG="$(git describe --tags --abbrev=0 --exclude="${{ needs.detect-and-tag.outputs.tag }}" 2>/dev/null || true)"
               {
                   echo "### Changes"
                   echo
@@ -235,7 +383,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.detect-and-tag.outputs.tag }}
           name: Release ${{ steps.get_version.outputs.VERSION }}
           body_path: release_notes.md
           draft: false
@@ -249,33 +397,14 @@ jobs:
         with:
           subject-path: dist/*
 
-  build-plugin-builder:
-    name: Build Plugin Builder
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build plugin builder
-        run: cargo build --release --bin cargo-kpl
-
-      - name: Upload plugin builder artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-kpl-linux-x86_64
-          path: target/release/cargo-kpl
-          if-no-files-found: error
-
   # Publishing to crates.io is best-effort and intentionally decoupled from the
   # binary release: a publish failure (e.g. a version that already exists) must
   # never cancel or block the GitHub Release. Runs only on tag pushes.
   publish-crates:
     name: Publish to crates.io
+    needs: detect-and-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.detect-and-tag.outputs.should_release == 'true'
     continue-on-error: true
     steps:
       - name: Checkout code
@@ -284,35 +413,30 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # Order matters when crates depend on each other. These are leaf crates
-      # today, but we keep a deterministic order so adding inter-crate deps later
-      # "just works". docs.rs automatically builds & hosts documentation for each
-      # crate once it lands on crates.io (configured via [package.metadata.docs.rs]).
+      # Order matters when crates depend on each other. `protocol` must publish
+      # first (auth/netty depend on it); the rest are leaves today. docs.rs
+      # automatically builds & hosts documentation for each crate once it lands
+      # on crates.io (configured via [package.metadata.docs.rs]).
       - name: Publish crates (best-effort, in dependency order)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set +e
-          # workspace-member crates (manifest under crates/<name>)
-          for crate in protocol config api plugin-system; do
+          for crate in protocol auth netty config api plugin-system cluster metrics; do
             echo "::group::publish kojacoord-$crate"
             cargo publish --manifest-path "crates/$crate/Cargo.toml" --no-verify
             echo "exit=$? (non-fatal)"
             echo "::endgroup::"
           done
-          # the plugin builder lives at the repo root, not under crates/
-          echo "::group::publish cargo-kpl (plugin builder)"
-          cargo publish --manifest-path "cargo-kpl/Cargo.toml" --no-verify
-          echo "exit=$? (non-fatal)"
-          echo "::endgroup::"
           exit 0
 
   # Build the full workspace rustdoc and publish it to GitHub Pages. This is the
   # self-hosted companion to docs.rs (which builds per-crate docs on publish).
   deploy-docs:
     name: Deploy Documentation
+    needs: detect-and-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.detect-and-tag.outputs.should_release == 'true'
     permissions:
       contents: read
       pages: write
@@ -334,10 +458,13 @@ jobs:
         run: |
           cargo doc --no-deps \
             -p kojacoord-protocol \
+            -p kojacoord-auth \
+            -p kojacoord-netty \
             -p kojacoord-config \
             -p kojacoord-api \
             -p kojacoord-plugin-system \
-            -p cargo-kpl
+            -p kojacoord-cluster \
+            -p kojacoord-metrics
 
       - name: Add index redirect
         run: |
@@ -359,8 +486,9 @@ jobs:
   # GitHub Container Registry (GHCR). Multi-arch (amd64 + arm64) via Buildx/QEMU.
   docker:
     name: Build & Push Docker image
+    needs: detect-and-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.detect-and-tag.outputs.should_release == 'true'
     permissions:
       contents: read
       packages: write
@@ -419,9 +547,9 @@ jobs:
   # with a single command. Best-effort: never blocks the core release.
   package-managers:
     name: Update package managers
-    needs: create-release
+    needs: [detect-and-tag, create-release]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.detect-and-tag.outputs.should_release == 'true'
     continue-on-error: true
     permissions:
       contents: write
@@ -431,7 +559,10 @@ jobs:
 
       - name: Extract version from tag
         id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        # Pulled from `detect-and-tag` rather than `${GITHUB_REF}` —
+        # on master-push runs the ref is `refs/heads/master`, not the
+        # `v<x.y.z>` tag; the detect job has the canonical version.
+        run: echo "VERSION=${{ needs.detect-and-tag.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       # Pull the signed checksum manifest published by create-release so the
       # generated formulae reference the exact bytes that were released.
@@ -439,7 +570,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release download "${{ github.ref_name }}" \
+          gh release download "${{ needs.detect-and-tag.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "SHA256SUMS" \
             --output SHA256SUMS
@@ -553,7 +684,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.ref_name }}" \
+          gh release upload "${{ needs.detect-and-tag.outputs.tag }}" \
             Formula/kojacoord-proxy.rb \
             bucket/kojacoord-proxy.json \
             --repo "${{ github.repository }}" --clobber

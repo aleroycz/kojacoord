@@ -124,6 +124,37 @@ impl LimboPackets for V1_19 {
         pos: PlayerPos,
         teleport_id: i32,
     ) -> Option<EncodedPacket> {
+        // 1.17 / 1.17.1 / 1.18 / 1.18.2 / 1.19 / 1.19.1 / 1.19.2 /
+        // 1.19.3 (proto 755 - 762) carry a trailing
+        // `dismount_vehicle: bool` byte after `teleport_id`. Mojang
+        // added it at 1.17 (per ViaVersion
+        // `EntityPacketRewriter1_17` line 144: `create(Types.BOOLEAN,
+        // false); // Dismount vehicle`) and removed it at 1.19.4
+        // (per `EntityPacketRewriter1_19_4` line 93:
+        // `if (wrapper.read(Types.BOOLEAN)) { // Dismount vehicle`).
+        //
+        // The v1_19 typed encoder doesn't emit the byte, so without
+        // this guard the 1.17 client expects 36 wire bytes and gets
+        // 35 — exact match for the user-reported
+        // `readerIndex(35) + length(1) exceeds writerIndex(35)`
+        // disconnect.
+        if (755..=762).contains(&proto) {
+            use kojacoord_protocol::codec::PacketId;
+            let pid = p::ClientboundPlayerPosition::packet_id(proto);
+            if pid == 0xFF {
+                return None;
+            }
+            let mut body = BytesMut::new();
+            body.put_f64(pos.x);
+            body.put_f64(pos.y);
+            body.put_f64(pos.z);
+            body.put_f32(pos.yaw);
+            body.put_f32(pos.pitch);
+            body.put_u8(0); // flags
+            VarInt(teleport_id).encode(&mut body).ok()?;
+            body.put_u8(0); // dismount_vehicle = false
+            return Some(EncodedPacket { id: pid, body });
+        }
         encode(
             proto,
             p::ClientboundPlayerPosition {
@@ -167,8 +198,36 @@ impl LimboPackets for V1_19 {
     }
 
     fn note_sound(&self, proto: u32, pos: SoundParams) -> Option<EncodedPacket> {
-        // Use the v1_21_x ClientboundSound shape — same wire format
-        // across 1.19+; registry resolves the id.
+        // Sound packet wire shape across this canonical bucket:
+        //   proto 755 - 758 (1.17 / 1.18.x): legacy NamedSoundEffect
+        //       [Identifier sound_name][VarInt sound_category]
+        //       [i32 x*8][i32 y*8][i32 z*8][f32 volume][f32 pitch]
+        //   proto 759 - 760 (1.19 / 1.19.1.2.0): + `seed: i64` trailer
+        //   proto 761+ (1.19.3+): + `sound_type` VarInt prefix +
+        //                          `seed` trailer
+        //
+        // The v1_21_x typed encoder writes the 1.19.3+ shape with
+        // both extras. Sending that to a 1.17 client shifts every
+        // position-and-volume field by 5 bytes (sound_type VarInt(0)
+        // = 1 byte) → the client reads our sound_category byte as
+        // `effect_pos_x` and so on; eventually a non-existent
+        // SoundCategory index lookup fires
+        // `ArrayIndexOutOfBoundsException: Index 24 out of bounds for
+        // length 10` (the 1.17 SoundCategory enum has 10 variants).
+        if (755..=758).contains(&proto) {
+            return encode(
+                proto,
+                kojacoord_protocol::versions::v1_16_x::play::ClientboundNamedSoundEffect {
+                    sound_name: "minecraft:music_disc.cat".to_owned(),
+                    sound_category: VarInt(2),
+                    effect_position_x: (pos.x * 8.0) as i32,
+                    effect_position_y: (pos.y * 8.0) as i32,
+                    effect_position_z: (pos.z * 8.0) as i32,
+                    volume: pos.volume,
+                    pitch: pos.pitch,
+                },
+            );
+        }
         encode(
             proto,
             kojacoord_protocol::versions::v1_21_x::play::ClientboundSound {
@@ -251,8 +310,11 @@ fn build_join_game_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedP
         return None;
     }
     let registry_codec = crate::protocol::build_dimension_codec_for_proto(proto).ok()?;
-    let dimension_nbt =
-        kojacoord_protocol::dimension_codec::dimension_type_nbt("minecraft:overworld").ok()?;
+    let dimension_nbt = kojacoord_protocol::dimension_codec::dimension_type_nbt_for_proto(
+        "minecraft:overworld",
+        proto,
+    )
+    .ok()?;
 
     let mut body = BytesMut::new();
     body.put_i32(0); // entity_id
@@ -302,8 +364,11 @@ fn build_respawn_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedPac
     if pid == 0xFF {
         return None;
     }
-    let dimension_nbt =
-        kojacoord_protocol::dimension_codec::dimension_type_nbt("minecraft:overworld").ok()?;
+    let dimension_nbt = kojacoord_protocol::dimension_codec::dimension_type_nbt_for_proto(
+        "minecraft:overworld",
+        proto,
+    )
+    .ok()?;
 
     let mut body = BytesMut::new();
     body.put_slice(&dimension_nbt);
@@ -320,4 +385,91 @@ fn build_respawn_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedPac
     body.put_u8(0); // copy_metadata = false
 
     Some(EncodedPacket { id: pid, body })
+}
+
+#[cfg(test)]
+mod ship_check {
+    //! PlayerPosition body-length pins. Mojang's `dismount_vehicle`
+    //! trailing bool lived on the wire from proto 755 (1.17) through
+    //! proto 762 (1.19.3), then was removed at 1.19.4 (proto 763).
+    //! These tests fail if the body length doesn't match the
+    //! per-proto spec.
+    use super::*;
+
+    fn body_len(proto: u32) -> usize {
+        let v = V1_19;
+        let pos = PlayerPos {
+            x: 0.0,
+            y: 256.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        v.player_position(proto, pos, 1)
+            .expect("must build")
+            .body
+            .len()
+    }
+
+    /// PlayerPosition body field sum without `dismount_vehicle`:
+    /// `f64*3 + f32*2 + u8 flags + VarInt(1)` = 24 + 8 + 1 + 1 = 34 bytes.
+    #[test]
+    fn proto_754_player_position_body_is_34_bytes_no_dismount() {
+        // 1.16.5 — pre-1.17 era, no dismount_vehicle.
+        assert_eq!(body_len(754), 34);
+    }
+
+    #[test]
+    fn proto_755_player_position_body_is_35_bytes_with_dismount() {
+        // 1.17 — this turn's reported bug. Adds the dismount_vehicle byte.
+        assert_eq!(body_len(755), 35, "1.17 must include dismount_vehicle");
+    }
+
+    #[test]
+    fn proto_758_player_position_body_is_35_bytes_with_dismount() {
+        // 1.18.2 — still in the dismount window.
+        assert_eq!(body_len(758), 35);
+    }
+
+    #[test]
+    fn proto_762_player_position_body_is_35_bytes_with_dismount() {
+        // 1.19.3 — last proto with dismount_vehicle.
+        assert_eq!(body_len(762), 35);
+    }
+
+    #[test]
+    fn proto_763_player_position_body_is_34_bytes_no_dismount() {
+        // 1.19.4 — Mojang removed dismount_vehicle here.
+        assert_eq!(body_len(763), 34);
+    }
+
+    fn sound_body_len(proto: u32) -> usize {
+        let v = V1_19;
+        let s = SoundParams {
+            x: 0.0,
+            y: 256.0,
+            z: 0.0,
+            volume: 1.0,
+            pitch: 1.0,
+        };
+        v.note_sound(proto, s).expect("must build").body.len()
+    }
+
+    /// 1.17 / 1.18 Sound body = `[VarInt(24) "minecraft:music_disc.cat"]`
+    /// `[VarInt cat=2][i32×3][f32×2]` = 1 + 24 + 1 + 12 + 8 = 46.
+    /// Specifically MUST NOT include `sound_type` VarInt prefix or
+    /// `seed` i64 trailer (those are 1.19.3+).
+    #[test]
+    fn proto_755_sound_body_is_46_bytes_no_seed_no_sound_type() {
+        assert_eq!(
+            sound_body_len(755),
+            46,
+            "1.17 Sound must use legacy NamedSoundEffect shape (no sound_type, no seed)"
+        );
+    }
+
+    #[test]
+    fn proto_758_sound_body_is_46_bytes_no_seed_no_sound_type() {
+        assert_eq!(sound_body_len(758), 46);
+    }
 }

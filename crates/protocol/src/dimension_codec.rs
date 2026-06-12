@@ -58,8 +58,17 @@ fn dimension_type_element(
     m.insert("bed_works".into(), b(1));
     m.insert("effects".into(), s(effects));
     m.insert("has_raids".into(), b(1));
-    m.insert("min_y".into(), i(0));
-    m.insert("height".into(), i(256));
+    // `min_y` and `height` were added in 1.17 (proto 755). Before
+    // that the world was implicitly 0..256. ViaVersion's
+    // `dimension-registry-1.16.2.nbt` confirms these fields are
+    // absent at 1.16.2-1.16.5; we gate them on the 1.20.4 flag here
+    // as a conservative approximation (callers wanting precise 1.17
+    // vs 1.16.2 behaviour should use the proxy-core
+    // `build_dimension_codec_for_proto` instead).
+    if is_1_20_4 {
+        m.insert("min_y".into(), i(0));
+        m.insert("height".into(), i(256));
+    }
     m.insert("logical_height".into(), i(256));
     m.insert("coordinate_scale".into(), NbtTag::Double(1.0));
     m.insert("ultrawarm".into(), b(ultrawarm as i8));
@@ -190,16 +199,47 @@ fn dimension_codec_nbt_with_version(is_1_20_4: bool) -> Result<Vec<u8>, Protocol
 
 /// Build the standalone "dimension type" compound the 1.16.2+ JoinGame embeds
 /// right after the codec. `key` is e.g. "minecraft:overworld".
+///
+/// Legacy alias for `dimension_type_nbt_for_proto(key, 754)`. Kept for
+/// downstream callers that don't yet know the negotiated proto.
 pub fn dimension_type_nbt(key: &str) -> Result<Vec<u8>, ProtocolError> {
-    dimension_type_nbt_with_version(key, false)
+    dimension_type_nbt_with_version(key, DimSchema::V1_16_2)
 }
 
 /// Build the standalone "dimension type" compound for 1.20.4+ JoinGame.
 pub fn dimension_type_nbt_1_20_4(key: &str) -> Result<Vec<u8>, ProtocolError> {
-    dimension_type_nbt_with_version(key, true)
+    dimension_type_nbt_with_version(key, DimSchema::V1_20_4)
 }
 
-fn dimension_type_nbt_with_version(key: &str, is_1_20_4: bool) -> Result<Vec<u8>, ProtocolError> {
+/// Proto-aware inline dimension NBT.
+///
+/// Per minecraft.wiki §JoinGame + ViaVersion `EntityPacketRewriter1_17`:
+///   * 751 - 754 (1.16.2 - 1.16.5)  →  13-field element, no `min_y`/`height`
+///   * 755 - 763 (1.17  - 1.19.4)   →  + `min_y`/`height` (1.17 additions)
+///   * 764+      (1.20.2+)          →  + `monster_spawn_light_level`,
+///                                      `monster_spawn_block_light_limit`,
+///                                      `fixed_time` int placeholder
+pub fn dimension_type_nbt_for_proto(key: &str, proto: u32) -> Result<Vec<u8>, ProtocolError> {
+    let schema = match proto {
+        p if p >= 764 => DimSchema::V1_20_4,
+        p if p >= 755 => DimSchema::V1_17,
+        _ => DimSchema::V1_16_2,
+    };
+    dimension_type_nbt_with_version(key, schema)
+}
+
+/// Per-era schema selector for the inline dimension element.
+#[derive(Debug, Clone, Copy)]
+enum DimSchema {
+    /// 1.16.2-1.16.5: 13-field set, no height/min_y.
+    V1_16_2,
+    /// 1.17-1.19.4: 1.16.2 set + `min_y` + `height`.
+    V1_17,
+    /// 1.20.4+: 1.17 set + spawn-light fields + fixed_time placeholder.
+    V1_20_4,
+}
+
+fn dimension_type_nbt_with_version(key: &str, schema: DimSchema) -> Result<Vec<u8>, ProtocolError> {
     let (infiniburn, effects, has_skylight, has_ceiling, ultrawarm, natural) = match key {
         "minecraft:the_nether" => (
             "minecraft:infiniburn_nether",
@@ -233,8 +273,9 @@ fn dimension_type_nbt_with_version(key: &str, is_1_20_4: bool) -> Result<Vec<u8>
         natural,
         infiniburn,
         effects,
-        is_1_20_4,
+        matches!(schema, DimSchema::V1_20_4),
     );
+    let element = augment_for_schema(element, schema);
     let mut root = HashMap::new();
     if let NbtTag::Compound(m) = element {
         root.extend(m);
@@ -246,6 +287,33 @@ fn dimension_type_nbt_with_version(key: &str, is_1_20_4: bool) -> Result<Vec<u8>
     let mut buf = BytesMut::new();
     nbt.encode(&mut buf)?;
     Ok(buf.to_vec())
+}
+
+/// Augment a base element compound with the per-era extras. Called
+/// after `dimension_type_element` so the base 13-field set is shared
+/// across all eras and only the per-era additions live here.
+fn augment_for_schema(element: NbtTag, schema: DimSchema) -> NbtTag {
+    let NbtTag::Compound(mut m) = element else {
+        return element;
+    };
+    match schema {
+        DimSchema::V1_16_2 => {},
+        DimSchema::V1_17 => {
+            // 1.17 added `min_y` + `height` per ViaVersion
+            // `EntityPacketRewriter1_17::addNewDimensionData`.
+            m.insert("min_y".into(), i(0));
+            m.insert("height".into(), i(256));
+        },
+        DimSchema::V1_20_4 => {
+            // 1.20.4+: `min_y`/`height` AND the spawn-light fields +
+            // `fixed_time` placeholder. `dimension_type_element` with
+            // `is_1_20_4 = true` already added the spawn-light extras,
+            // so here we only need the 1.17 carry-overs.
+            m.insert("min_y".into(), i(0));
+            m.insert("height".into(), i(256));
+        },
+    }
+    NbtTag::Compound(m)
 }
 
 #[cfg(test)]

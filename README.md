@@ -143,16 +143,37 @@ That's it—you should see the proxy start up and begin accepting connections!
 
 ## Supported versions
 
-We support a wide range of Minecraft versions:
+Client → limbo entry status (each row is end-to-end verified against a real
+vanilla client of that version: client reaches the limbo flat-world spawn,
+the chat / sound / abilities / keepalive loop holds, and the proxy can
+gracefully kick with the configured shutdown reason):
 
-- 1.6.x - 1.8.x (Protocol 5-47)
-- 1.12.x (Protocol 335-340)
-- 1.16.x (Protocol 751-754)
-- 1.19.x (Protocol 759-760)
-- 1.20.x (Protocol 763-764)
-- 1.21.x (Latest)
+| Version family   | Protocol range | Status                              |
+| ---------------- | -------------- | ----------------------------------- |
+| 1.6.x            | 73 - 78        | Tested                              |
+| 1.7.x            | 4 - 5          | Tested                              |
+| 1.8.x            | 47             | Tested                              |
+| 1.9.x            | 107 - 110      | WIP                                 |
+| 1.10.x           | 210 - 210      | WIP                                 |
+| 1.11.x           | 315 - 316      | WIP                                 |
+| 1.12.x           | 335 - 340      | Tested                              |
+| 1.13.x           | 393 - 404      | Tested                              |
+| 1.14.x           | 477 - 498      | Tested                              |
+| 1.15.x           | 573 - 578      | Tested                              |
+| 1.16.x           | 735 - 754      | Tested                              |
+| 1.17.x           | 755 - 756      | Tested                              |
+| 1.18.x           | 757 - 758      | Tested                              |
+| 1.19.x           | 759 - 762      | WIP                                 |
+| 1.20.x           | 763 - 766      | WIP                                 |
+| 1.21.x           | 767+           | WIP                                 |
 
-Protocol conversion happens automatically when clients connect to backend servers running different versions—no manual configuration needed.
+Protocol conversion happens automatically when clients connect to backend
+servers running different versions—no manual configuration needed. The
+1.6.x ↔ 1.12.2 converter pair (`v1_6_4_to_v1_12_2.rs` /
+`v1_12_2_to_v1_6_4.rs`) covers the full gameplay packet set bidirectionally;
+the relay framing is pre-netty-aware so 1.6 clients see raw `[id][body]`
+bytes while modern backends still get varint-length-framed + compressed
+packets.
 
 ## API docs
 

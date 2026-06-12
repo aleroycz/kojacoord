@@ -194,7 +194,14 @@ impl<'a> LimboHandler<'a> {
         // so the `LimboPackets` default implementations return `None`
         // for them and `send_built(None)` no-ops. Only V1_6 actually
         // emits anything here — see `limbo_packets::v1_6::V1_6`.
-        if self.protocol_version < 47 {
+        //
+        // IMPORTANT: protocol numbers RESET between 1.6 and 1.7. 1.6.4
+        // is proto 78, 1.7.x is proto 4-5, 1.8 is proto 47. A naive
+        // `< 47` check would SKIP 1.6.x because 78 > 47. Use the
+        // `is_pre_netty_proto` helper instead so we hit the right
+        // epoch regardless of where the proto number lives on the
+        // post-reset numberline.
+        if crate::packet_io::is_pre_netty_proto(self.protocol_version) {
             let spawn = self.packets.spawn_position(
                 self.protocol_version,
                 PlayerPos {
@@ -282,6 +289,30 @@ impl<'a> LimboHandler<'a> {
                     ka_id = ka_id.wrapping_add(1);
                     tracing::trace!(player = %username, keepalive_id = ka_id, "Sending keepalive");
                     self.send_keepalive(ka_id).await?;
+                }
+                // Clone the Notify Arc out of self before the select!
+                // so the `self.read_and_discard()` mutable borrow on
+                // the same line doesn't conflict with the immutable
+                // borrow on `self.state.shutdown_notify`.
+                _shutdown = {
+                    let notify = Arc::clone(&self.state.shutdown_notify);
+                    async move { notify.notified().await }
+                } => {
+                    // Proxy shutting down — kick the limbo'd player
+                    // with the configured reason before we drop the
+                    // socket. Limbo owns the stream so we send the
+                    // disconnect ourselves with the right wire format.
+                    let reason = self.state.shutdown_reason.load().as_ref().clone();
+                    let raw =
+                        crate::packet_builder::build_disconnect_packet(&reason, self.protocol_version);
+                    let _ = crate::packet_io::write_client_packet(
+                        &mut *self.stream,
+                        &raw,
+                        self.protocol_version,
+                        self.compression_threshold,
+                    )
+                    .await;
+                    return Err(ConnectionError::Closed);
                 }
                 result = self.read_and_discard() => {
                     match result {
@@ -557,7 +588,162 @@ impl<'a> LimboHandler<'a> {
     }
 
     async fn read_and_discard(&mut self) -> Result<(), ConnectionError> {
+        if crate::packet_io::is_pre_netty_proto(self.protocol_version) {
+            return self.read_and_discard_pre_netty().await;
+        }
         crate::packet_io::read_frame(&mut *self.stream).await?;
+        Ok(())
+    }
+
+    /// Pre-netty (1.6.x) doesn't varint-length-frame anything — each
+    /// packet starts with a raw `[u8 packet_id]` followed by a
+    /// per-packet-shaped body. `read_frame` would misread the first
+    /// byte as a length VarInt and desync, so we hand-decode the
+    /// shapes limbo cares about discarding.
+    ///
+    /// Shapes verified against HexaCord `Packet*::readPacketData` and
+    /// ProtocolSupport `serverbound game_v_1_5_2` definitions. If the
+    /// client emits an id we don't recognise we close the connection
+    /// rather than guess at the length — that's better than reading
+    /// random bytes as the next packet's id.
+    async fn read_and_discard_pre_netty(&mut self) -> Result<(), ConnectionError> {
+        use tokio::io::AsyncReadExt;
+        let mut id_buf = [0u8; 1];
+        self.stream
+            .read_exact(&mut id_buf)
+            .await
+            .map_err(ConnectionError::Io)?;
+        let packet_id = id_buf[0];
+
+        // UCS-2 short-prefixed string reader (used by Chat + Plugin
+        // Message channel). Returns the byte length consumed from the
+        // stream so the caller can keep a running total.
+        async fn read_ucs2_string(
+            stream: &mut crate::connection::McStream,
+        ) -> Result<usize, ConnectionError> {
+            use tokio::io::AsyncReadExt;
+            let mut len_buf = [0u8; 2];
+            stream
+                .read_exact(&mut len_buf)
+                .await
+                .map_err(ConnectionError::Io)?;
+            let char_count = u16::from_be_bytes(len_buf) as usize;
+            let mut tail = vec![0u8; char_count * 2];
+            stream
+                .read_exact(&mut tail)
+                .await
+                .map_err(ConnectionError::Io)?;
+            Ok(2 + char_count * 2)
+        }
+
+        async fn consume(
+            stream: &mut crate::connection::McStream,
+            n: usize,
+        ) -> Result<(), ConnectionError> {
+            use tokio::io::AsyncReadExt;
+            let mut sink = vec![0u8; n];
+            stream
+                .read_exact(&mut sink)
+                .await
+                .map_err(ConnectionError::Io)?;
+            Ok(())
+        }
+
+        match packet_id {
+            // 0x00 KeepAlive: [i32 keep_alive_id]
+            0x00 => consume(&mut *self.stream, 4).await?,
+            // 0x03 Chat: [UCS-2 String message]
+            0x03 => {
+                read_ucs2_string(&mut *self.stream).await?;
+            },
+            // 0x07 UseEntity: [i32 user][i32 target][i8 left_click]
+            0x07 => consume(&mut *self.stream, 9).await?,
+            // 0x0A Player (on-ground only): [bool on_ground]
+            0x0A => consume(&mut *self.stream, 1).await?,
+            // 0x0B PlayerPosition: [f64 x][f64 y][f64 stance][f64 z][bool on_ground]
+            0x0B => consume(&mut *self.stream, 33).await?,
+            // 0x0C PlayerLook: [f32 yaw][f32 pitch][bool on_ground]
+            0x0C => consume(&mut *self.stream, 9).await?,
+            // 0x0D PlayerPositionLook: [f64 x][f64 y][f64 stance][f64 z]
+            //                          [f32 yaw][f32 pitch][bool on_ground]
+            0x0D => consume(&mut *self.stream, 41).await?,
+            // 0x0E PlayerDigging: [i8 status][i32 x][i8 y][i32 z][i8 face]
+            0x0E => consume(&mut *self.stream, 11).await?,
+            // 0x10 HeldItemChange (c2s): [i16 slot]
+            0x10 => consume(&mut *self.stream, 2).await?,
+            // 0x12 Animation: [i32 entity_id][i8 animation]
+            0x12 => consume(&mut *self.stream, 5).await?,
+            // 0x13 EntityAction: [i32 entity_id][i8 action_id][i32 jump_boost]
+            0x13 => consume(&mut *self.stream, 9).await?,
+            // 0xCA PlayerAbilities (c2s): [i8 flags][f32 fly][f32 walk]
+            0xCA => consume(&mut *self.stream, 9).await?,
+            // 0xCB TabComplete: [UCS-2 String text]
+            0xCB => {
+                read_ucs2_string(&mut *self.stream).await?;
+            },
+            // 0xCC LocaleAndViewDistance: [UCS-2 String locale][i8 view_distance]
+            //                             [i8 chat_flags][i8 difficulty][bool show_cape]
+            // Sent by the client immediately after Packet1Login. Per
+            // HexaCord `Packet204LocaleAndViewDistance::readPacketData`:
+            //
+            //   locale         = readString(in, 7)
+            //   viewDistance   = readByte()      ← 1 byte
+            //   chatFlags      = readByte()      ← 1 byte (bitfield: bits 0-2
+            //                                       visibility, bit 3 colors;
+            //                                       NOT two separate fields)
+            //   difficulty     = readByte()      ← 1 byte
+            //   showCape       = readBoolean()   ← 1 byte
+            //
+            // That's 4 bytes after the locale, NOT 5. A previous 5-byte
+            // consume here ate the first byte of the next packet and
+            // shifted every subsequent c2s read by 1 — you'd see a
+            // "unknown packet id 0x43" (or similar garbage byte) on
+            // whatever packet followed LocaleAndViewDistance.
+            0xCC => {
+                read_ucs2_string(&mut *self.stream).await?;
+                consume(&mut *self.stream, 4).await?;
+            },
+            // 0xCD ClientStatus: [i8 status]
+            // Sent by the client to acknowledge respawn (status = 0) or
+            // open inventory achievement (status = 1).
+            0xCD => consume(&mut *self.stream, 1).await?,
+            // 0xFA Plugin Message: [UCS-2 channel][i16 data_len][bytes data]
+            0xFA => {
+                read_ucs2_string(&mut *self.stream).await?;
+                let mut data_len_buf = [0u8; 2];
+                use tokio::io::AsyncReadExt;
+                self.stream
+                    .read_exact(&mut data_len_buf)
+                    .await
+                    .map_err(ConnectionError::Io)?;
+                let data_len = i16::from_be_bytes(data_len_buf).max(0) as usize;
+                if data_len > 0 {
+                    consume(&mut *self.stream, data_len).await?;
+                }
+            },
+            // 0xFE ServerListPing: [u8 magic = 0x01]
+            // Some clients re-ping mid-session for live MOTD refreshes.
+            // We swallow it silently here — limbo doesn't need to reply.
+            0xFE => consume(&mut *self.stream, 1).await?,
+            // 0xFF Disconnect: [UCS-2 String reason] — client said
+            // goodbye. Drain the reason and let the next read cycle
+            // hit EOF cleanly.
+            0xFF => {
+                read_ucs2_string(&mut *self.stream).await?;
+            },
+            other => {
+                tracing::warn!(
+                    packet_id = other,
+                    "1.6.x limbo received unknown serverbound packet id; closing connection"
+                );
+                return Err(ConnectionError::Protocol(
+                    kojacoord_protocol::ProtocolError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unknown pre-netty packet id 0x{:02X}", other),
+                    )),
+                ));
+            },
+        }
         Ok(())
     }
 }

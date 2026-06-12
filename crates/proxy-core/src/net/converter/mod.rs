@@ -217,6 +217,73 @@ impl PacketConverter {
                         },
                     }
                 },
+                // V1_12_2 backend → V1_6_4 client. The common
+                // "1.6.x client on a modern server" scenario — every
+                // gameplay packet the server emits needs reshaping into
+                // pre-netty wire format before the legacy client can
+                // parse it.
+                (ProtocolVersion::V1_12_2, ProtocolVersion::V1_6_4) => {
+                    v1_12_2_to_v1_6_4::convert_s2c(payload)
+                },
+                // V1_16_5 / V1_20_4 / V1_21 backend → V1_6_4 client.
+                // Long-haul: compose modern→1.12.2→1.6.4 so we reuse
+                // the same per-version field shaping.
+                (sv, ProtocolVersion::V1_6_4) if sv.id() > ProtocolVersion::V1_12_2.id() => {
+                    let intermediate = match sv {
+                        ProtocolVersion::V1_16_5 => {
+                            v1_16_5_to_v1_12_2::convert_s2c(payload, repacker.clone())
+                        },
+                        _ => match v1_20_4_to_v1_16_5::convert_s2c(payload) {
+                            ConversionResult::Converted(pkts) => {
+                                let mut out = Vec::new();
+                                for pkt in pkts {
+                                    match v1_16_5_to_v1_12_2::convert_s2c(pkt, repacker.clone()) {
+                                        ConversionResult::Converted(p2) => out.extend(p2),
+                                        ConversionResult::Passthrough => {},
+                                        ConversionResult::Drop => {},
+                                        ConversionResult::InjectS2C(_) => {},
+                                    }
+                                }
+                                if out.is_empty() {
+                                    ConversionResult::Drop
+                                } else {
+                                    ConversionResult::Converted(out)
+                                }
+                            },
+                            other => other,
+                        },
+                    };
+                    match intermediate {
+                        ConversionResult::Passthrough => ConversionResult::Passthrough,
+                        ConversionResult::Drop => ConversionResult::Drop,
+                        ConversionResult::InjectS2C(_) => ConversionResult::Drop,
+                        ConversionResult::Converted(pkts) => {
+                            let mut out = Vec::new();
+                            for pkt in pkts {
+                                match v1_12_2_to_v1_6_4::convert_s2c(pkt) {
+                                    ConversionResult::Converted(p2) => out.extend(p2),
+                                    ConversionResult::Passthrough => {},
+                                    ConversionResult::Drop => {},
+                                    ConversionResult::InjectS2C(_) => {},
+                                }
+                            }
+                            if out.is_empty() {
+                                ConversionResult::Drop
+                            } else {
+                                ConversionResult::Converted(out)
+                            }
+                        },
+                    }
+                },
+                // V1_8 backend → V1_6_4 client. Hop through 1.12.2.
+                (ProtocolVersion::V1_8, ProtocolVersion::V1_6_4) => {
+                    // v1_8 → v1_12 is mostly identity at the s2c level
+                    // for the packets v1_12_2_to_v1_6_4 cares about
+                    // (KeepAlive, Chat, PluginMessage, etc are nearly
+                    // wire-identical). Pass through to v1_12_2_to_v1_6_4
+                    // directly.
+                    v1_12_2_to_v1_6_4::convert_s2c(payload)
+                },
                 _ => dispatch_canonical_s2c(payload, server_proto, client_proto, repacker),
             },
 

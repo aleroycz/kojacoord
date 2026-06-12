@@ -44,7 +44,7 @@ use crate::{
     packet_ids::{
         cb_play, cb_plugin_message_id, chat_packet_ids_for, sb_play, sb_plugin_message_id,
     },
-    packet_io::{read_packet, write_packet},
+    packet_io::{read_client_packet, read_packet, write_client_packet, write_packet},
     plugin_decoder,
     protocol::dimension_codec::{
         build_minimal_dimension_codec, determine_injection_mode, CodecInjectionMode,
@@ -96,7 +96,10 @@ macro_rules! kick {
     ($cw:expr, $reason:expr, $proto:expr, $thresh:expr) => {{
         let msg = build_kick_message($reason);
         let pkt = build_disconnect_packet(&msg, $proto);
-        let _ = write_packet(&mut *$cw.lock().await, &pkt, $thresh).await;
+        // Use the proto-aware client writer so pre-netty (1.6.x) clients
+        // get a raw-bytes disconnect frame and modern clients get the
+        // varint-length-framed form.
+        let _ = write_client_packet(&mut *$cw.lock().await, &pkt, $proto, $thresh).await;
         return Err(ConnectionError::Closed);
     }};
 }
@@ -302,6 +305,17 @@ impl PacketRelay {
                 let payload = tokio::select! {
                     biased;
                     _ = stop_s2c_wait.notified() => return Ok(()),
+                    _ = state_s2c.shutdown_notify.notified() => {
+                        // Proxy is shutting down — send the configured
+                        // Disconnect packet to the client before we
+                        // drop the socket. Without this the client
+                        // sees "End of stream".
+                        let reason = state_s2c.shutdown_reason.load().as_ref().clone();
+                        let raw = crate::packet_builder::build_disconnect_packet(&reason, proto);
+                        let mut cw = cw_s2c.lock().await;
+                        let _ = write_client_packet(&mut *cw, &raw, proto, client_thresh).await;
+                        return Ok(());
+                    },
                     r = read_packet(&mut *br_mut, backend_thresh) => r?,
                 };
 
@@ -324,7 +338,7 @@ impl PacketRelay {
                     Ok(v) => v.0 as u8,
                     Err(_) => {
                         let mut cw = cw_s2c.lock().await;
-                        write_packet(&mut *cw, &payload, client_thresh).await?;
+                        write_client_packet(&mut *cw, &payload, proto, client_thresh).await?;
                         continue;
                     }
                 };
@@ -338,7 +352,7 @@ impl PacketRelay {
 
                 if pkt_id == cb_chunk_id {
                     let mut cw = cw_s2c.lock().await;
-                    write_packet(&mut *cw, &payload, client_thresh).await?;
+                    write_client_packet(&mut *cw, &payload, proto, client_thresh).await?;
                     continue;
                 }
 
@@ -361,7 +375,7 @@ impl PacketRelay {
                                     &resp,
                                     proto,
                                 );
-                                write_packet(&mut *cw_s2c.lock().await, &pkt_raw, client_thresh).await?;
+                                write_client_packet(&mut *cw_s2c.lock().await, &pkt_raw, proto, client_thresh).await?;
                             }
                             continue;
                         }
@@ -435,7 +449,7 @@ impl PacketRelay {
                             ) {
                                 Ok(data) => {
                                     let mut cw = cw_s2c.lock().await;
-                                    write_packet(&mut *cw, &data, client_thresh).await?;
+                                    write_client_packet(&mut *cw, &data, proto, client_thresh).await?;
                                 }
                                 Err(_) => {
                                     tracing::trace!(pkt_id, "S→C dropped by plugin hook");
@@ -456,7 +470,7 @@ impl PacketRelay {
                                     player_uuid,
                                 ) {
                                     Ok(data) => {
-                                        write_packet(&mut *cw, &data, client_thresh).await?;
+                                        write_client_packet(&mut *cw, &data, proto, client_thresh).await?;
                                     }
                                     Err(_) => {
                                         tracing::trace!(pkt_id, "S→C converted packet dropped by plugin hook");
@@ -482,7 +496,7 @@ impl PacketRelay {
                     ) {
                         Ok(data) => {
                             let mut cw = cw_s2c.lock().await;
-                            write_packet(&mut *cw, &data, client_thresh).await?;
+                            write_client_packet(&mut *cw, &data, proto, client_thresh).await?;
                         }
                         Err(_) => {
                             tracing::trace!(pkt_id, "S→C dropped by plugin hook");
@@ -510,6 +524,15 @@ impl PacketRelay {
                     let payload = tokio::select! {
                         biased;
                         _ = stop_c2s_wait.notified() => return Ok(()),
+                        _ = state_c2s.shutdown_notify.notified() => {
+                            // Proxy is shutting down — s2c loop is
+                            // already writing the Disconnect packet,
+                            // so we just stop reading from the client
+                            // and unwind. Returning here releases our
+                            // half of the read/write split and lets
+                            // the s2c task drop the socket cleanly.
+                            return Ok(());
+                        },
                         backend_pkt = backend_out_rx.recv() => {
                             match backend_pkt {
                                 Some(raw) => {
@@ -519,7 +542,7 @@ impl PacketRelay {
                                 None => return Ok(()),
                             }
                         }
-                        r = read_packet(&mut *cr_mut, client_thresh) => r?,
+                        r = read_client_packet(&mut *cr_mut, proto, client_thresh) => r?,
                     };
 
                     // Per-connection abuse guard: enforce inbound packet-rate and
@@ -640,8 +663,13 @@ impl PacketRelay {
 
                                 let pkt_raw =
                                     build_plugin_message_packet(&msg.channel, &payload, proto);
-                                write_packet(&mut *cw_c2s.lock().await, &pkt_raw, client_thresh)
-                                    .await?;
+                                write_client_packet(
+                                    &mut *cw_c2s.lock().await,
+                                    &pkt_raw,
+                                    proto,
+                                    client_thresh,
+                                )
+                                .await?;
                                 tracing::debug!(
                                     channel = %msg.channel,
                                     "server-selector: answered server-list request"
@@ -768,8 +796,12 @@ impl PacketRelay {
                                     let mut cw = cw_c2s.lock().await;
                                     for msg in &messages {
                                         let encoded_raw = build_system_message_packet(msg, proto);
-                                        if let Err(e) =
-                                            write_packet(&mut *cw, &encoded_raw, client_thresh)
+                                        if let Err(e) = write_client_packet(
+                                            &mut *cw,
+                                            &encoded_raw,
+                                            proto,
+                                            client_thresh,
+                                        )
                                                 .await
                                         {
                                             tracing::warn!(
@@ -918,7 +950,7 @@ impl PacketRelay {
                     _ = stop_out_wait.notified() => break,
                     msg = out_rx.recv() => match msg {
                         Some(raw) => {
-                            if write_packet(&mut *cw_out.lock().await, &raw, client_thresh).await.is_err() {
+                            if write_client_packet(&mut *cw_out.lock().await, &raw, proto, client_thresh).await.is_err() {
                                 break;
                             }
                         }
@@ -1013,7 +1045,7 @@ where
     };
 
     let raw = build_system_message_packet(&message, proto);
-    write_packet(&mut *cw.lock().await, &raw, client_thresh).await?;
+    write_client_packet(&mut *cw.lock().await, &raw, proto, client_thresh).await?;
     Ok(false)
 }
 

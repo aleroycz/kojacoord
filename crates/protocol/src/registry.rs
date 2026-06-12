@@ -96,12 +96,74 @@ impl PacketRegistry {
             return Some(meta.id);
         }
 
+        // Name-alias fallback: a handful of typed-packet structs use a
+        // single Rust name (`ClientboundHeldItemChange`) that maps to
+        // a different packet name across epochs:
+        //   * pre-netty (proto 78): `ClientboundHeldItemChange` (the
+        //     authentic Notchian `Packet16BlockItemSwitch` name).
+        //   * modern (proto 5+): `ClientboundSetHeldItem` /
+        //     `ClientboundSetCarriedItem` (Mojang renamed it after 1.7).
+        //
+        // When the primary lookup misses we retry with the modern
+        // alias for non-pre-netty requests. This keeps the registry
+        // data minimal (one entry per (proto, real_name) instead of
+        // duplicating 48 ClientboundSetHeldItem rows as
+        // ClientboundHeldItemChange).
+        let lookup_alias = |alias_name: &'static str| -> Option<u8> {
+            let mut bp: Option<u32> = None;
+            let mut bi: Option<u8> = None;
+            for (p, meta) in dir_vec {
+                if meta.name != alias_name || *p > proto || *p == 78 {
+                    continue;
+                }
+                if bp.map_or(true, |x| *p > x) {
+                    bp = Some(*p);
+                    bi = Some(meta.id);
+                }
+            }
+            bi
+        };
+
+        // Walk back to the most recent registered proto ≤ request,
+        // BUT never cross the pre-netty (78) ↔ netty (5+) boundary.
+        //
+        // Proto numbers reset between 1.6 (78) and 1.7 (4-5), so a
+        // naive "most recent ≤ request" walk treats pre-netty 78 as
+        // the highest "≤ 393" anchor when no netty registration
+        // exists — handing back the pre-netty packet id (e.g.
+        // `ClientboundHeldItemChange` = 0x10 at proto 78) to a 1.13
+        // client, where 0x10 means Tab-Complete (a multi-VarInt
+        // packet). The 1.13 decoder then reads past the body and
+        // throws `IndexOutOfBoundsException: readerIndex(2) + length(1)
+        // exceeds writerIndex(2)`.
+        //
+        // The right behaviour: pre-netty IDs are only valid fallbacks
+        // for pre-netty requests, and vice versa.
+        let request_is_pre_netty = proto == 78;
         let mut best_proto: Option<u32> = None;
         let mut best_id: Option<u8> = None;
         for (p, meta) in dir_vec {
-            if meta.name == name && *p <= proto && best_proto.map_or(true, |bp| *p > bp) {
+            if meta.name != name || *p > proto {
+                continue;
+            }
+            let candidate_is_pre_netty = *p == 78;
+            if candidate_is_pre_netty != request_is_pre_netty {
+                continue;
+            }
+            if best_proto.map_or(true, |bp| *p > bp) {
                 best_proto = Some(*p);
                 best_id = Some(meta.id);
+            }
+        }
+        if best_id.is_none() && !request_is_pre_netty {
+            // Try the modern-rename aliases. Each is a known
+            // pre-netty-name → modern-name mapping.
+            let aliased: Option<u8> = match name {
+                "ClientboundHeldItemChange" => lookup_alias("ClientboundSetHeldItem"),
+                _ => None,
+            };
+            if aliased.is_some() {
+                return aliased;
             }
         }
         best_id
@@ -488,7 +550,9 @@ const PLAY: &[Entry] = &[
     // (no recognised 1.6.4 packet at that id). Corrected against
     // HexaCord packet classes:
     (78, ProtocolState::Play, Direction::Clientbound, "ClientboundKeepAlive",       0x00), // Packet0KeepAlive
-    (78, ProtocolState::Play, Direction::Clientbound, "ClientboundLoginRequest",    0x01), // Packet1Login — the pre-netty "JoinGame"
+    // Packet1Login (0x01) is registered in the login surface as
+    // `LoginRequestS2C` — connection.rs sends it at LoginSuccess time,
+    // not from the play state, so there's no separate play entry.
     (78, ProtocolState::Play, Direction::Clientbound, "ClientboundTimeUpdate",      0x04), // Packet4UpdateTime
     (78, ProtocolState::Play, Direction::Clientbound, "ClientboundSpawnPosition",   0x06), // Packet6SpawnPosition
     (78, ProtocolState::Play, Direction::Clientbound, "ClientboundUpdateHealth",    0x08), // Packet8UpdateHealth

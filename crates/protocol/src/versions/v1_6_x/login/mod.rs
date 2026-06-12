@@ -261,3 +261,63 @@ impl Decode for ClientboundLoginDisconnect {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `LoginRequestS2C` (Packet1Login) wire shape matches
+    /// HexaCord `Packet1Login::write`. Encode-then-decode round-trips
+    /// and the byte length equals the sum of fields. This is the
+    /// pre-netty client's world-entry signal sent by
+    /// `connection.rs::send_login_success` for proto 78.
+    #[test]
+    fn login_request_round_trip() {
+        let original = LoginRequestS2C {
+            entity_id: 1234,
+            level_type: "flat".to_string(),
+            game_mode: 3,
+            dimension: 0,
+            difficulty: 0,
+            world_height: 0,
+            max_players: 20,
+        };
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf).unwrap();
+
+        //   4 (entity_id)
+        // + 2 + 4 * 2 (level_type "flat" UCS-2: 2-byte length prefix
+        //              + 4 chars × 2 bytes per char)
+        // + 1 + 1 + 1 + 1 + 1 (game_mode/dimension/difficulty/world_height/max_players)
+        assert_eq!(buf.len(), 4 + 2 + 4 * 2 + 5, "wire size mismatch");
+
+        let mut bytes = buf.freeze();
+        let decoded = LoginRequestS2C::decode(&mut bytes).unwrap();
+        assert_eq!(decoded.entity_id, original.entity_id);
+        assert_eq!(decoded.level_type, original.level_type);
+        assert_eq!(decoded.game_mode, original.game_mode);
+        assert_eq!(decoded.dimension, original.dimension);
+        assert_eq!(decoded.difficulty, original.difficulty);
+        assert_eq!(decoded.world_height, original.world_height);
+        assert_eq!(decoded.max_players, original.max_players);
+        assert_eq!(bytes.remaining(), 0, "every byte consumed");
+    }
+
+    /// First 4 bytes of the encoded LoginRequest MUST be entity_id BE,
+    /// not the level_type. Catches an encode-order regression.
+    #[test]
+    fn login_request_entity_id_is_first_field() {
+        let pkt = LoginRequestS2C {
+            entity_id: 0x42,
+            level_type: "flat".to_string(),
+            game_mode: 0,
+            dimension: 0,
+            difficulty: 0,
+            world_height: 0,
+            max_players: 0,
+        };
+        let mut buf = BytesMut::new();
+        pkt.encode(&mut buf).unwrap();
+        assert_eq!(&buf[..4], &[0x00, 0x00, 0x00, 0x42]);
+    }
+}

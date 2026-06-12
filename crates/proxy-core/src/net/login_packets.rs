@@ -92,27 +92,33 @@ pub fn build_login_success(
             )
         },
         CanonicalVersion::V1_16_5 => {
-            // LoginSuccess wire shape:
-            //   proto 5  - 578  (1.7  - 1.15.2): String UUID (hyphenated,
-            //                                   client-side capped at 36) +
-            //                                   String username (capped at 16).
-            //   proto 735+ (1.16+)              : 16 raw UUID bytes +
-            //                                   String username (+ properties
-            //                                   from 1.19 onward).
+            // LoginSuccess wire shape — three distinct era boundaries
+            // inside this canonical bucket. Verified against
+            // minecraft.wiki Java_Edition_protocol/Packets#Login_Success
+            // per-version entries:
             //
-            // The V1_16_5 canonical bucket spans the whole 1.13 - 1.16
-            // epoch on the play side (it owns the flattened block table,
-            // dimension codec, etc.) but the login-state UUID shape
-            // changed at proto 735. So we dispatch on proto here instead
-            // of canonical: anything before 735 borrows the v1_12 typed
-            // packet (UUID-as-string), 735+ uses the v1_16 form.
+            //   proto 5 - 578  (1.7 - 1.15.2):
+            //       String UUID (hyphenated, client-side capped at 36)
+            //       String username (capped at 16)
             //
-            // Without this branch a 1.13-1.15 client reads the first
-            // byte of our 16-byte UUID as a VarInt String length —
-            // common values land in the 100s — and disconnects with
-            // "The received string length is longer than maximum
-            // allowed (NNN > 36)". Confirmed against minecraft.wiki
-            // Java_Edition_protocol/Packets#Login_Success.
+            //   proto 735 - 758 (1.16 - 1.18.2):
+            //       16 raw UUID bytes
+            //       String username
+            //       (NO properties array — added later)
+            //
+            //   proto 759+ (1.19+):
+            //       16 raw UUID bytes
+            //       String username
+            //       VarInt prop_count + N × ProfileProperty
+            //
+            // The previous code lumped 1.16+ together using the v1_16
+            // typed struct, which unconditionally writes the prop_count
+            // VarInt + properties — but for an online-mode player with
+            // a real Mojang `textures` property attached, that's ~1000
+            // bytes the 1.16-1.18 client sees as trailing garbage and
+            // rejects with
+            // `"Packet 2/2 (sy) was larger than I expected, found NNNN
+            // bytes extra whilst reading packet 2"`.
             if proto < 735 {
                 use kojacoord_protocol::versions::v1_12_x::login::ClientboundLoginSuccess;
                 encode(
@@ -123,6 +129,23 @@ pub fn build_login_success(
                         properties: Vec::new(),
                     },
                 )
+            } else if proto < 759 {
+                // 1.16 - 1.18: raw UUID + String username, no
+                // properties trailer. Hand-encode rather than
+                // borrowing a typed struct, since neither v1_16 nor
+                // v1_19 typed forms match this exact shape (v1_16
+                // includes properties; v1_19 also includes properties).
+                use kojacoord_protocol::codec::Encode;
+                use kojacoord_protocol::types::VarInt;
+                let mut body = bytes::BytesMut::new();
+                let (hi, lo) = uuid.as_u64_pair();
+                use bytes::BufMut;
+                body.put_i64(hi as i64);
+                body.put_i64(lo as i64);
+                let user_bytes = username.as_bytes();
+                VarInt(user_bytes.len() as i32).encode(&mut body).ok()?;
+                body.put_slice(user_bytes);
+                Some(EncodedPacket { id: 0x02, body })
             } else {
                 use kojacoord_protocol::versions::v1_16_x::login::{
                     ClientboundLoginSuccess, ProfileProperty,
@@ -146,25 +169,58 @@ pub fn build_login_success(
             }
         },
         CanonicalVersion::V1_19_4 => {
-            use kojacoord_protocol::versions::v1_19_x::login::{
-                ClientboundLoginSuccess, ProfileProperty,
-            };
-            encode(
-                proto,
-                ClientboundLoginSuccess {
-                    uuid,
-                    username,
-                    properties: profile
-                        .properties
-                        .iter()
-                        .map(|p| ProfileProperty {
-                            name: p.name.clone(),
-                            value: p.value.clone(),
-                            signature: p.signature.clone(),
-                        })
-                        .collect(),
-                },
-            )
+            // The V1_19_4 canonical bucket spans proto 755 - 763
+            // (1.17 - 1.19.4) on the play side, but the LoginSuccess
+            // wire shape splits at the **same proto 759 boundary** as
+            // the V1_16_5 bucket above — Mojang only added the
+            // properties trailer at 1.19 (proto 759). Per
+            // minecraft.wiki §Login_Success per-version table and
+            // BungeeCord `LoginSuccess.java::write`:
+            //
+            //   proto 755 - 758 (1.17 / 1.17.1 / 1.18 / 1.18.2):
+            //       [16 raw UUID bytes][String username]
+            //   proto 759+ (1.19+):
+            //       [16 raw UUID bytes][String username]
+            //       [VarInt prop_count][N × ProfileProperty]
+            //
+            // Writing properties unconditionally for 755-758 trails
+            // ~1107 bytes of `textures` property after the 16-byte
+            // username, the same exact `"Packet 2/2 ... found 1107
+            // bytes extra"` cascade we fixed at the V1_16_5 bucket
+            // for 1.16-1.18.2.
+            if proto < 759 {
+                use kojacoord_protocol::codec::Encode;
+                use kojacoord_protocol::types::VarInt;
+                let mut body = bytes::BytesMut::new();
+                let (hi, lo) = uuid.as_u64_pair();
+                use bytes::BufMut;
+                body.put_i64(hi as i64);
+                body.put_i64(lo as i64);
+                let user_bytes = username.as_bytes();
+                VarInt(user_bytes.len() as i32).encode(&mut body).ok()?;
+                body.put_slice(user_bytes);
+                Some(EncodedPacket { id: 0x02, body })
+            } else {
+                use kojacoord_protocol::versions::v1_19_x::login::{
+                    ClientboundLoginSuccess, ProfileProperty,
+                };
+                encode(
+                    proto,
+                    ClientboundLoginSuccess {
+                        uuid,
+                        username,
+                        properties: profile
+                            .properties
+                            .iter()
+                            .map(|p| ProfileProperty {
+                                name: p.name.clone(),
+                                value: p.value.clone(),
+                                signature: p.signature.clone(),
+                            })
+                            .collect(),
+                    },
+                )
+            }
         },
         CanonicalVersion::V1_20_4 => {
             use kojacoord_protocol::versions::v1_20_x::login::{
@@ -618,4 +674,97 @@ pub fn build_backend_login_start(
     }
     // V1_6_4: no LoginStart packet (pre-netty has Handshake-with-username).
     None
+}
+
+#[cfg(test)]
+mod ship_check {
+    //! LoginSuccess wire-shape regression pins. Every era boundary
+    //! where Mojang added/removed a field is asserted here so future
+    //! refactors can't quietly re-introduce the
+    //! `"Packet 2/2 (vn/sy) was larger than I expected"` cascade.
+    use super::*;
+    use kojacoord_auth::ProfileProperty as AuthProp;
+    use uuid::Uuid;
+
+    fn profile_with_textures() -> (Uuid, String, Vec<AuthProp>) {
+        let uuid = Uuid::from_u128(0x123456789ABCDEF0_0FEDCBA987654321);
+        let username = "Vakea".to_string();
+        // A realistic-sized textures property (Mojang's actual blob is
+        // ~1100 bytes; we just need something non-trivial).
+        let big_value: String = "a".repeat(1000);
+        let big_sig: String = "b".repeat(684);
+        let props = vec![AuthProp {
+            name: "textures".into(),
+            value: big_value,
+            signature: Some(big_sig),
+        }];
+        (uuid, username, props)
+    }
+
+    fn build(proto: u32, canonical: CanonicalVersion) -> Vec<u8> {
+        let (uuid, username, properties) = profile_with_textures();
+        let profile = LoginProfile {
+            uuid,
+            username: &username,
+            properties: &properties,
+        };
+        let pkt = build_login_success(canonical, proto, &profile).expect("must build");
+        let mut out = Vec::new();
+        out.push(pkt.id);
+        out.extend_from_slice(&pkt.body);
+        out
+    }
+
+    /// Body wire bytes for [16-UUID + VarInt(5) + "Vakea"] without
+    /// any properties trailer. Used by the no-properties pins.
+    fn expected_no_props_body_len() -> usize {
+        // packet_id (1) + UUID (16) + VarInt(5) (1) + "Vakea" (5)
+        1 + 16 + 1 + 5
+    }
+
+    #[test]
+    fn proto_754_login_success_has_no_properties_trailer() {
+        // 1.16.5
+        let bytes = build(754, CanonicalVersion::V1_16_5);
+        assert_eq!(
+            bytes.len(),
+            expected_no_props_body_len(),
+            "1.16.5 LoginSuccess must not include properties trailer"
+        );
+    }
+
+    #[test]
+    fn proto_755_login_success_has_no_properties_trailer() {
+        // 1.17 — the bug this turn reported.
+        let bytes = build(755, CanonicalVersion::V1_19_4);
+        assert_eq!(
+            bytes.len(),
+            expected_no_props_body_len(),
+            "1.17 LoginSuccess must not include properties trailer — \
+             Mojang added it at 1.19 (proto 759), not 1.17"
+        );
+    }
+
+    #[test]
+    fn proto_758_login_success_has_no_properties_trailer() {
+        // 1.18.2
+        let bytes = build(758, CanonicalVersion::V1_19_4);
+        assert_eq!(
+            bytes.len(),
+            expected_no_props_body_len(),
+            "1.18.2 LoginSuccess must not include properties trailer"
+        );
+    }
+
+    #[test]
+    fn proto_759_login_success_does_include_properties_trailer() {
+        // 1.19 — sanity check the other direction.
+        let bytes = build(759, CanonicalVersion::V1_19_4);
+        assert!(
+            bytes.len() > expected_no_props_body_len() + 1000,
+            "1.19 LoginSuccess must include the properties trailer \
+             (~1000+ bytes for textures), got {} bytes",
+            bytes.len()
+        );
+    }
 }
