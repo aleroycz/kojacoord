@@ -16,7 +16,6 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY src ./src
-COPY cargo-kpl ./cargo-kpl
 
 # Build in release mode
 ENV SQLX_OFFLINE=true
@@ -43,18 +42,11 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/target/release/kojacoord-proxy /app/kojacoord-proxy
 
-# Copy plugin builder
-COPY --from=builder /build/target/release/cargo-kpl /app/cargo-kpl
-
-# Set permissions
-RUN chmod +x /app/kojacoord-proxy /app/cargo-kpl \
-    && chown kojacoord:kojacoord /app/kojacoord-proxy /app/cargo-kpl
-
 # Switch to non-root user
 USER kojacoord
 
 # Expose default Minecraft proxy port and API ports
-EXPOSE 25577 8080 8081
+EXPOSE 25565 8080 8081
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
