@@ -1055,13 +1055,49 @@ impl ClientConnection {
             matches!(e, ConnectionError::Closed | ConnectionError::Io(_))
         }
 
+        let client_ip = self.addr.ip();
+
+        // BungeeCord-style PreLogin: fired before authentication so plugins can
+        // deny a connection (IP bans, allowlists, maintenance mode) before any
+        // crypto work. There is no session yet, so we call broadcast_event
+        // directly and act on the response here rather than via
+        // dispatch_plugin_event (which assumes a live session). Gated behind the
+        // lock-free activity flag so the lock is only taken when a plugin cares.
+        if self
+            .state
+            .plugin_activity
+            .subscribes(kojacoord_plugin_system::PluginEventKind::PreLogin)
+        {
+            let responses = self
+                .state
+                .plugin_manager
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .broadcast_event(&kojacoord_plugin_system::PluginEvent::PreLogin {
+                    username: username.clone(),
+                    address: client_ip.to_string(),
+                });
+            let denied = responses.iter().find_map(|r| match r {
+                kojacoord_plugin_system::PluginResponse::Cancel => {
+                    Some("Connection refused.".to_string())
+                },
+                kojacoord_plugin_system::PluginResponse::KickPlayer { reason, .. } => {
+                    Some(reason.clone())
+                },
+                _ => None,
+            });
+            if let Some(reason) = denied {
+                let json = serde_json::json!({ "text": reason, "color": "red" }).to_string();
+                let _ = self.send_disconnect_login(&json).await;
+                return Err(ConnectionError::Auth("login rejected by plugin".into()));
+            }
+        }
+
         let mut auth_pipeline = self
             .state
             .auth_pipeline_config
             .build()
             .map_err(|e| ConnectionError::Auth(e.to_string()))?;
-
-        let client_ip = self.addr.ip();
 
         let outbound = auth_pipeline
             .process(
@@ -1422,15 +1458,51 @@ impl ClientConnection {
             }
         }
 
-        // Notify plugins that a player joined. A plugin may veto the join by
-        // returning a KickPlayer response for this player.
-        let join_kicked = self
+        // Load this player's LuckPerms-shaped permission nodes from the DB
+        // and cache them for the session, so command/permission checks see
+        // their per-user grants. Best-effort: an absent DB or error leaves
+        // them on role-only permissions.
+        if let Some(db) = &self.state.db {
+            match db.load_user_nodes(uuid).await {
+                Ok(rows) => {
+                    let nodes = rows
+                        .into_iter()
+                        .map(|(node, value, server)| crate::permissions::UserNode {
+                            node,
+                            value,
+                            server,
+                        })
+                        .collect();
+                    self.state.permissions.cache_user(uuid, nodes);
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, %uuid, "failed to load user permission nodes");
+                },
+            }
+        }
+
+        // BungeeCord-style PostLogin: login is complete and the player is
+        // attached, fired before PlayerJoin so plugins can set up per-player
+        // state (e.g. permissions) before join handlers run. A kick here
+        // vetoes the join just like PlayerJoin does.
+        let post_login_kicked = self
             .state
-            .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerJoin {
+            .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PostLogin {
                 uuid,
                 username: username.clone(),
             })
             .await;
+
+        // Notify plugins that a player joined. A plugin may veto the join by
+        // returning a KickPlayer response for this player.
+        let join_kicked = post_login_kicked
+            || self
+                .state
+                .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerJoin {
+                    uuid,
+                    username: username.clone(),
+                })
+                .await;
 
         if !join_kicked {
             let analytics = self.state.analytics.clone();
@@ -1476,6 +1548,23 @@ impl ClientConnection {
             },
         };
 
+        // Initial backend established — fire ServerConnect so plugins see the
+        // first server the player lands on (cold path, fire-and-forget). The
+        // target is whatever connect_to_backend recorded on the session.
+        {
+            let target = {
+                let s = session.read().await;
+                s.current_server.clone().unwrap_or_default()
+            };
+            let _ = self
+                .state
+                .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::ServerConnect {
+                    uuid,
+                    target,
+                })
+                .await;
+        }
+
         // Now in play state — any error from here on triggers a
         // play-state Disconnect via `send_graceful_kick`.
         self.conn_state = ConnectionState::Play;
@@ -1505,6 +1594,16 @@ impl ClientConnection {
                         Ok((new_backend, new_threshold)) => {
                             backend = new_backend;
                             backend_threshold = new_threshold;
+                            let _ = self
+                                .state
+                                .dispatch_plugin_event(
+                                    kojacoord_plugin_system::PluginEvent::ServerSwitch {
+                                        uuid,
+                                        from: None,
+                                        to: target.clone(),
+                                    },
+                                )
+                                .await;
                             continue;
                         },
                         Err(e) => {
@@ -1529,6 +1628,20 @@ impl ClientConnection {
                         "backend kicked player — falling back to limbo"
                     );
                     self.stream = client_stream;
+                    // Notify plugins of the backend kick so they can react
+                    // (log, reroute, etc.). Cold path, fire-and-forget.
+                    let kicked_from = {
+                        let s = session.read().await;
+                        s.current_server.clone().unwrap_or_default()
+                    };
+                    let _ = self
+                        .state
+                        .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::ServerKick {
+                            uuid,
+                            server: kicked_from,
+                            reason: crate::packet_builder::plaintext_from_chat_json(&reason),
+                        })
+                        .await;
                     // Send the kick reason as a system chat message
                     // so the player understands why they ended up
                     // in limbo. Best-effort: ignore failures.
@@ -1571,6 +1684,16 @@ impl ClientConnection {
                         Ok((new_backend, new_threshold)) => {
                             backend = new_backend;
                             backend_threshold = new_threshold;
+                            let _ = self
+                                .state
+                                .dispatch_plugin_event(
+                                    kojacoord_plugin_system::PluginEvent::ServerSwitch {
+                                        uuid,
+                                        from: None,
+                                        to: fallback_target.clone(),
+                                    },
+                                )
+                                .await;
                             continue;
                         },
                         Err(e) => break Err(e),
@@ -1582,13 +1705,25 @@ impl ClientConnection {
 
         self.state.sessions.remove(&uuid);
 
+        // Drop cached permission nodes for this player.
+        self.state.permissions.evict_user(&uuid);
+
         // Unregister player from metrics tracking
         self.state.player_metrics.unregister_player(uuid).await;
 
-        // Notify plugins that the player left (fire-and-forget).
+        // Notify plugins that the player left (fire-and-forget). Both the
+        // legacy PlayerLeave and the BungeeCord-style PlayerDisconnect fire so
+        // existing and new plugins are covered.
         let _ = self
             .state
             .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerLeave { uuid })
+            .await;
+        let _ = self
+            .state
+            .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerDisconnect {
+                uuid,
+                username: username.clone(),
+            })
             .await;
 
         let analytics = self.state.analytics.clone();

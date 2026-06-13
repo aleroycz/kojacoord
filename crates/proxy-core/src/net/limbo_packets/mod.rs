@@ -121,6 +121,111 @@ pub(crate) fn void_chunk_body(sections: usize, trust_edges: bool, hm: HeightmapF
     body
 }
 
+/// Builds a void (all-air) 1.17 / 1.17.1 `LevelChunk` packet body (proto 755/756).
+///
+/// 1.17 predates the 1.18 combined chunk+light packet, so this uses the
+/// distinct 1.17 wire shape (per ViaVersion `ChunkType1_17` /
+/// `ChunkSectionType1_16`):
+///   * a `BitSet` section mask (long array) BEFORE the heightmaps — the field
+///     the 1.18 combined format dropped. Omitting it makes the client read the
+///     heightmap's `0x0a` TAG byte as the mask length and then fail with
+///     "Can't read heightmap in packet for [0, 0]".
+///   * chunk-level biomes (`VAR_INT_ARRAY`, 64 cells per section, all id 0) —
+///     1.18 moved biomes into the sections instead.
+///   * sections in the **1.16** palette format: a *minimum of 4 bits per
+///     block* (1.16/1.17 has no single-valued bits=0 palette), a one-entry air
+///     palette, and a full 256-long data array of zeros.
+///   * NO light / `trust_edges` — light is the separate `LightUpdate` packet
+///     ([`light_update_body_1_17`]).
+pub(crate) fn void_chunk_body_1_17(sections: usize) -> BytesMut {
+    use kojacoord_protocol::codec::Encode;
+    use kojacoord_protocol::types::VarInt;
+
+    let mut body = BytesMut::new();
+    body.put_i32(0); // chunk x
+    body.put_i32(0); // chunk z
+
+    // Section bitmask: BitSet.toLongArray() with every section present.
+    let mask: i64 = if sections >= 64 {
+        -1
+    } else {
+        ((1u64 << sections) - 1) as i64
+    };
+    let _ = VarInt(1).encode(&mut body); // long-array length
+    body.put_i64(mask);
+
+    // Heightmaps (named NBT). 256-high overworld → 9 bits/256 entries → 37 longs.
+    body.put_u8(0x0a); // TAG_Compound
+    body.put_u16(0); // empty name
+    put_motion_blocking_field(&mut body);
+    body.put_u8(0x00); // TAG_End
+
+    // Chunk-level biomes: VAR_INT_ARRAY = VarInt(len) + len×VarInt. The cell
+    // count is 16 horizontal (4×4) × (height/4) vertical = 64 per section.
+    let biome_cells = sections * 64;
+    let _ = VarInt(biome_cells as i32).encode(&mut body);
+    for _ in 0..biome_cells {
+        let _ = VarInt(0).encode(&mut body); // biome id 0
+    }
+
+    // Sections, 1.16 format (no per-section biomes).
+    let mut cd = BytesMut::new();
+    for _ in 0..sections {
+        cd.put_i16(0); // non-air block count
+        cd.put_u8(4); // bits per block (1.16/1.17 minimum is 4, not 0)
+        let _ = VarInt(1).encode(&mut cd); // palette length
+        let _ = VarInt(0).encode(&mut cd); // palette[0] = minecraft:air
+                                           // 4 bits × 4096 cells = 256 longs, all zero → every cell is palette idx 0.
+        let _ = VarInt(256).encode(&mut cd); // data long count
+        for _ in 0..256 {
+            cd.put_i64(0);
+        }
+    }
+    let _ = VarInt(cd.len() as i32).encode(&mut body);
+    body.put_slice(&cd);
+
+    // Block entities (NAMED_COMPOUND_TAG_ARRAY): none.
+    let _ = VarInt(0).encode(&mut body);
+    body
+}
+
+/// Builds the void `LightUpdate` packet body for 1.17 / 1.17.1 (proto 755/756).
+///
+/// Mirrors the light trailer of the 1.18 combined chunk but as its own packet
+/// with a `[VarInt x][VarInt z]` prefix (per ViaVersion
+/// `WorldPacketRewriter1_17` LIGHT_UPDATE). Every light section is declared
+/// explicitly empty (all-lit, zero data) so the client treats the void chunk
+/// as fully lit instead of rendering it pitch black.
+pub(crate) fn light_update_body_1_17(sections: usize) -> BytesMut {
+    use kojacoord_protocol::codec::Encode;
+    use kojacoord_protocol::types::VarInt;
+
+    let mut body = BytesMut::new();
+    let _ = VarInt(0).encode(&mut body); // chunk x
+    let _ = VarInt(0).encode(&mut body); // chunk z
+    body.put_u8(1); // trust edges
+
+    let light_sections = sections + 2;
+    let empty_mask: i64 = if light_sections >= 64 {
+        -1
+    } else {
+        ((1u64 << light_sections) - 1) as i64
+    };
+
+    // sky / block light masks: no data sections.
+    let _ = VarInt(0).encode(&mut body); // skyLightMask
+    let _ = VarInt(0).encode(&mut body); // blockLightMask
+                                         // empty masks: one long each, covering every light section.
+    let _ = VarInt(1).encode(&mut body);
+    body.put_i64(empty_mask); // emptySkyLightMask
+    let _ = VarInt(1).encode(&mut body);
+    body.put_i64(empty_mask); // emptyBlockLightMask
+                              // No actual light arrays.
+    let _ = VarInt(0).encode(&mut body); // sky light array count
+    let _ = VarInt(0).encode(&mut body); // block light array count
+    body
+}
+
 /// Writes a `MOTION_BLOCKING` long-array field of 37 zeroed `i64` values into an open NBT compound.
 ///
 /// The field is encoded as: TAG_Long_Array (0x0C), a u16 name length and name bytes for `"MOTION_BLOCKING"`,
@@ -328,6 +433,15 @@ pub trait LimboPackets: Send + Sync {
     /// assert!(pkt.is_some());
     /// ```
     fn chunk_data(&self, _proto: u32) -> Option<EncodedPacket> {
+        None
+    }
+
+    /// Build a standalone `LightUpdate` packet for the void chunk at (0, 0).
+    ///
+    /// Only 1.17 / 1.17.1 (proto 755/756) need this: they predate the 1.18
+    /// combined chunk+light packet, so light must be sent separately. Every
+    /// other bucket folds light into [`chunk_data`] and returns `None` here.
+    fn light_update(&self, _proto: u32) -> Option<EncodedPacket> {
         None
     }
 

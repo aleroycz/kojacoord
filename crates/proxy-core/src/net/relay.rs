@@ -113,6 +113,14 @@ impl PacketRelay {
         data: bytes::Bytes,
         player_uuid: uuid::Uuid,
     ) -> Result<bytes::Bytes, bytes::Bytes> {
+        // Fast path: no plugin registered any packet hooks, so don't
+        // touch the global plugin lock — one relaxed atomic load and we
+        // forward untouched. This keeps the per-packet relay cost flat
+        // when hooks aren't in use (the common case).
+        if !state.plugin_activity.has_packet_hooks() {
+            return Ok(data);
+        }
+
         let packet_data = PacketData {
             protocol_version,
             packet_id,
@@ -591,7 +599,17 @@ impl PacketRelay {
                     drop(session_data);
 
                     // Dispatch movement events to plugin system (anticheat, etc.).
-                    if pkt_id == sb_move_pos_rot_id || pkt_id == sb_move_pos_id {
+                    // Movement is the highest-frequency C→S packet, so gate the
+                    // whole decode + plugin fan-out behind a lock-free atomic: if
+                    // no loaded plugin subscribes to PlayerMove we skip it
+                    // entirely and never touch the global plugin lock. This is the
+                    // fix for the movement rubber-banding under load — previously
+                    // every move packet from every player contended on that lock.
+                    if (pkt_id == sb_move_pos_rot_id || pkt_id == sb_move_pos_id)
+                        && state_c2s
+                            .plugin_activity
+                            .subscribes(kojacoord_plugin_system::PluginEventKind::PlayerMove)
+                    {
                         let mut body = payload.clone();
                         let _ = VarInt::decode(&mut body);
                         if let (Ok(x), Ok(y), Ok(z)) = (

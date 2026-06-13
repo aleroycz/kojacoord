@@ -300,7 +300,7 @@ mod tests {
         // Sanity: TOML should load at least the air entry. Real data has
         // hundreds; this guards against the loader silently producing an
         // empty map.
-        assert!(blocks.len() >= 1);
+        assert!(!blocks.is_empty());
     }
 
     #[test]

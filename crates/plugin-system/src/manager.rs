@@ -7,8 +7,9 @@
 //! an await — see the field comment on `ProxyState::plugin_manager`.
 
 use crate::api::{
-    PacketData, PacketEvent, PacketHookResult, Plugin, PluginCommand, PluginContext, PluginEvent,
-    PluginMetadata, PluginPermission, PluginResponse,
+    CommandSender, PacketData, PacketEvent, PacketHookResult, Plugin, PluginActivity,
+    PluginCommand, PluginCommandSpec, PluginContext, PluginEvent, PluginMetadata, PluginPermission,
+    PluginResponse,
 };
 use crate::native_loader::PluginLoader;
 use crate::sandbox::{apply_sandbox, SandboxConfig};
@@ -45,6 +46,13 @@ pub struct PluginManager {
     /// throwaway current-thread runtime, so relying on `Handle::try_current()`
     /// alone there would let plugin tasks die. See [`Self::set_runtime_handle`].
     runtime_handle: Option<tokio::runtime::Handle>,
+    /// Lock-free snapshot of aggregate plugin interest, shared with the
+    /// proxy hot path. Recomputed on every load/unload. See
+    /// [`PluginActivity`].
+    activity: Arc<PluginActivity>,
+    /// Commands registered by plugins, keyed by lowercase label (and by
+    /// each alias). Maps to the owning plugin name and the spec.
+    commands: HashMap<String, (String, PluginCommandSpec)>,
 }
 
 impl PluginManager {
@@ -75,6 +83,8 @@ impl PluginManager {
             allowed_permissions: HashMap::new(),
             command_receivers: std::sync::Mutex::new(HashMap::new()),
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
+            activity: PluginActivity::new(),
+            commands: HashMap::new(),
         })
     }
 
@@ -103,7 +113,69 @@ impl PluginManager {
             allowed_permissions: HashMap::new(),
             command_receivers: std::sync::Mutex::new(HashMap::new()),
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
+            activity: PluginActivity::new(),
+            commands: HashMap::new(),
         })
+    }
+
+    /// A cheap clone of the lock-free activity snapshot. The proxy
+    /// stores this in `ProxyState` so the relay can gate plugin
+    /// dispatch without locking the manager. See [`PluginActivity`].
+    pub fn activity(&self) -> Arc<PluginActivity> {
+        Arc::clone(&self.activity)
+    }
+
+    /// Recompute the aggregate event-subscription mask and packet-hook
+    /// count from the currently loaded plugins and publish them to the
+    /// shared [`PluginActivity`]. Call after any load/unload.
+    fn refresh_activity(&self) {
+        let mut mask: u32 = 0;
+        for (plugin, _) in self.plugins.values() {
+            let guard = plugin.lock().unwrap_or_else(|e| e.into_inner());
+            mask |= guard.subscribed_events();
+        }
+        self.activity.set_event_mask(mask);
+        let hook_count = self
+            .packet_hooks
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        self.activity.set_packet_hook_count(hook_count);
+    }
+
+    /// Look up a plugin command by label or alias (case-insensitive),
+    /// returning the owning plugin name and its spec.
+    pub fn find_command(&self, label: &str) -> Option<(String, PluginCommandSpec)> {
+        self.commands.get(&label.to_lowercase()).cloned()
+    }
+
+    /// All registered plugin commands (deduplicated by owning plugin +
+    /// primary label), for `/help`-style listings.
+    pub fn list_commands(&self) -> Vec<(String, PluginCommandSpec)> {
+        let mut seen = std::collections::HashSet::new();
+        self.commands
+            .values()
+            .filter(|(owner, spec)| seen.insert((owner.clone(), spec.label.clone())))
+            .cloned()
+            .collect()
+    }
+
+    /// Dispatch a plugin command to its owning plugin. Returns the
+    /// plugin's response, or `Ok(None)` if no plugin owns `label`.
+    pub fn dispatch_command(
+        &self,
+        label: &str,
+        args: &[String],
+        sender: &CommandSender,
+    ) -> anyhow::Result<Option<PluginResponse>> {
+        let Some((owner, _spec)) = self.find_command(label) else {
+            return Ok(None);
+        };
+        let Some((plugin, _)) = self.plugins.get(&owner) else {
+            return Ok(None);
+        };
+        let mut guard = plugin.lock().unwrap_or_else(|e| e.into_inner());
+        guard.handle_command(label, args, sender)
     }
 
     /// Sets the Tokio runtime handle used to anchor tasks spawned by native plugins.
@@ -324,6 +396,29 @@ impl PluginManager {
             );
         }
 
+        // Register the plugin's commands under their label + aliases.
+        // A later plugin claiming an already-registered label is
+        // rejected for that label (first writer wins) so dispatch stays
+        // deterministic.
+        for spec in plugin.register_commands() {
+            let mut labels = vec![spec.label.clone()];
+            labels.extend(spec.aliases.iter().cloned());
+            for label in labels {
+                let key = label.to_lowercase();
+                if let Some((existing, _)) = self.commands.get(&key) {
+                    log::warn!(
+                        "Plugin '{}' command '{}' clashes with plugin '{}'; ignoring",
+                        metadata.name,
+                        key,
+                        existing
+                    );
+                    continue;
+                }
+                self.commands
+                    .insert(key, (plugin_name.clone(), spec.clone()));
+            }
+        }
+
         self.plugins.insert(
             plugin_name.clone(),
             (Arc::new(Mutex::new(plugin)), metadata.clone()),
@@ -336,6 +431,10 @@ impl PluginManager {
                 .unwrap_or_else(|e| e.into_inner());
             rx_lock.insert(plugin_name.clone(), cmd_rx);
         }
+
+        // Publish the new aggregate interest so the hot path sees this
+        // plugin's event subscriptions and hooks.
+        self.refresh_activity();
 
         log::info!(
             "Loaded plugin: {} v{} by {}",
@@ -527,6 +626,12 @@ impl PluginManager {
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
+
+            // Drop every command this plugin owned.
+            self.commands.retain(|_, (owner, _)| owner != name);
+
+            // Republish aggregate interest now that this plugin is gone.
+            self.refresh_activity();
 
             log::info!("Unloaded plugin: {}", name);
             return Ok(metadata);

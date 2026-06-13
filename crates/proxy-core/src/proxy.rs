@@ -148,6 +148,12 @@ pub struct ProxyState {
 
     pub roles: Arc<RoleRegistry>,
 
+    /// LuckPerms-shaped permission resolver: per-user nodes (with
+    /// negation + server context) layered over group inheritance, on
+    /// top of [`roles`](Self::roles). Use this for player permission
+    /// checks; `roles.rank_has_permission` remains for role-only gates.
+    pub permissions: Arc<crate::permissions::PermissionService>,
+
     pub outbound: Arc<DashMap<Uuid, mpsc::UnboundedSender<Bytes>>>,
     pub backend_outbound: Arc<DashMap<Uuid, mpsc::UnboundedSender<Bytes>>>,
 
@@ -164,6 +170,18 @@ pub struct ProxyState {
     /// The hot-reload watcher uses a channel-based approach to avoid holding locks
     /// across await points.
     pub plugin_manager: Arc<std::sync::RwLock<PluginManager>>,
+
+    /// Lock-free snapshot of which events plugins subscribe to and
+    /// whether any packet hooks are registered. The relay checks this
+    /// with a single relaxed atomic load before ever taking the
+    /// `plugin_manager` lock, so the per-packet hot path pays nothing
+    /// when no plugin is interested. Republished by the manager on
+    /// every plugin load/unload. See [`kojacoord_plugin_system::PluginActivity`].
+    pub plugin_activity: Arc<kojacoord_plugin_system::PluginActivity>,
+
+    /// Plugin-supplied limbo-world overrides (welcome message, boss-bar
+    /// title, spawn). Read once per limbo entry; defaults to built-ins.
+    pub limbo_customization: Arc<arc_swap::ArcSwap<crate::net::limbo::LimboCustomization>>,
 
     /// Plugin hot-reload channel. The watcher task (started by
     /// `start_plugin_hot_reload_watcher`) sends `(path, config)` tuples
@@ -359,6 +377,22 @@ impl ProxyState {
             },
             None => RoleRegistry::builtin_default(),
         };
+        let roles = Arc::new(roles);
+
+        // LuckPerms-shaped resolver: group inheritance edges from the DB
+        // (empty when no DB), layered over the role registry. Per-user
+        // nodes are loaded lazily on join.
+        let group_parents = match &db {
+            Some(db) => db.load_group_parents().await.unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to load group inheritance — none applied");
+                Vec::new()
+            }),
+            None => Vec::new(),
+        };
+        let permissions = Arc::new(crate::permissions::PermissionService::new(
+            Arc::clone(&roles),
+            group_parents,
+        ));
 
         let (cluster_coordinator, service_discovery) = if config.cluster.enabled {
             let local_node_id = Uuid::new_v4();
@@ -433,6 +467,13 @@ impl ProxyState {
                 PluginManager::new().context("Failed to create plugin manager")?,
             ))
         };
+
+        // Lock-free snapshot of plugin interest, shared with the relay
+        // hot path so it can skip the global plugin lock per packet.
+        let plugin_activity = plugin_manager
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .activity();
 
         let tps_tracker = Arc::new(TpsTracker::new());
 
@@ -511,7 +552,8 @@ impl ProxyState {
             metrics: Arc::new(ProxyMetrics::new()),
             auth_pipeline_config,
             db,
-            roles: Arc::new(roles),
+            roles,
+            permissions,
             outbound: Arc::new(DashMap::new()),
             backend_outbound: Arc::new(DashMap::new()),
             started_at: std::time::Instant::now(),
@@ -520,6 +562,10 @@ impl ProxyState {
             metrics_collector,
             analytics,
             plugin_manager,
+            plugin_activity,
+            limbo_customization: Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::net::limbo::LimboCustomization::default(),
+            )),
             hot_reload_tx,
             hot_reload_rx: std::sync::Mutex::new(Some(hot_reload_rx)),
             tps_tracker,
@@ -880,6 +926,10 @@ impl ProxyState {
                     // ServerListPing event and are consumed by the status
                     // handler directly. Ignore here.
                 },
+                PluginResponse::PermissionResult { .. } => {
+                    // Only meaningful when resolving a PermissionCheck;
+                    // the permission resolver consumes it directly.
+                },
             }
         }
         subject_kicked
@@ -1217,6 +1267,19 @@ impl ProxyState {
                         tracing::warn!(plugin = %plugin_name, error = %e, "Failed to update player status");
                     }
                 }
+            },
+            PluginCommand::SetLimboCustomization {
+                welcome_message,
+                bossbar_title,
+                spawn,
+            } => {
+                self.limbo_customization
+                    .store(Arc::new(crate::net::limbo::LimboCustomization {
+                        welcome_message,
+                        bossbar_title,
+                        spawn,
+                    }));
+                tracing::info!(plugin = %plugin_name, "Updated limbo customization");
             },
         }
     }

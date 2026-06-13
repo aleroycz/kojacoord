@@ -8,7 +8,7 @@
 //! in-memory-only behavior when it's `None`.
 
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -115,6 +115,32 @@ impl Db {
         .execute(&pool)
         .await?;
 
+        // LuckPerms-shaped per-user permission nodes. `value` 1=grant,
+        // 0=negate; `server` scopes the node to a backend (NULL = global).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS lp_user_nodes (
+                uuid VARCHAR(36) NOT NULL,
+                node VARCHAR(128) NOT NULL,
+                value TINYINT(1) NOT NULL DEFAULT 1,
+                server VARCHAR(64) NULL,
+                PRIMARY KEY (uuid, node, server),
+                INDEX idx_lp_user_nodes_uuid (uuid)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
+        // Group (role) inheritance edges: `child` inherits `parent`'s nodes.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS lp_group_parents (
+                child VARCHAR(32) NOT NULL,
+                parent VARCHAR(32) NOT NULL,
+                PRIMARY KEY (child, parent)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
         // See SQLite section for the rationale on this table.
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS cached_profiles (
@@ -136,10 +162,18 @@ impl Db {
     }
 
     pub async fn connect_sqlite(path: &str) -> Result<Self, sqlx::Error> {
+        // `.connect("data/proxy.db")` treats the string as a connection
+        // URL and, crucially, will NOT create the database file if it's
+        // missing — first-run installs failed with "unable to open
+        // database file". Build explicit connect options so the file
+        // (and journal) are created on demand.
+        let connect_options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .acquire_timeout(std::time::Duration::from_secs(10))
-            .connect(path)
+            .connect_with(connect_options)
             .await?;
 
         sqlx::query(
@@ -210,6 +244,32 @@ impl Db {
                 color TEXT NOT NULL DEFAULT 'WHITE',
                 weight INTEGER NOT NULL DEFAULT 0,
                 permissions TEXT
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
+        // LuckPerms-shaped per-user nodes (see MySQL section for semantics).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS lp_user_nodes (
+                uuid TEXT NOT NULL,
+                node TEXT NOT NULL,
+                value INTEGER NOT NULL DEFAULT 1,
+                server TEXT,
+                PRIMARY KEY (uuid, node, server)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_lp_user_nodes_uuid ON lp_user_nodes(uuid)")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS lp_group_parents (
+                child TEXT NOT NULL,
+                parent TEXT NOT NULL,
+                PRIMARY KEY (child, parent)
             )",
         )
         .execute(&pool)
@@ -547,6 +607,141 @@ impl Db {
             },
         };
 
+        Ok(rows)
+    }
+
+    /// Load every per-user permission node: `(node, granted, server_context)`.
+    pub async fn load_user_nodes(
+        &self,
+        uuid: Uuid,
+    ) -> Result<Vec<(String, bool, Option<String>)>, sqlx::Error> {
+        let uuid_str = uuid.hyphenated().to_string();
+        macro_rules! map_rows {
+            ($rows:expr) => {
+                $rows
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            r.get::<String, _>("node"),
+                            r.get::<i64, _>("value") != 0,
+                            r.get::<Option<String>, _>("server"),
+                        )
+                    })
+                    .collect()
+            };
+        }
+        let rows: Vec<(String, bool, Option<String>)> = if let Some(pool) = &self.mysql_pool {
+            let rows = sqlx::query("SELECT node, value, server FROM lp_user_nodes WHERE uuid = ?")
+                .bind(&uuid_str)
+                .fetch_all(pool)
+                .await?;
+            map_rows!(rows)
+        } else if let Some(pool) = &self.sqlite_pool {
+            let rows = sqlx::query("SELECT node, value, server FROM lp_user_nodes WHERE uuid = ?")
+                .bind(&uuid_str)
+                .fetch_all(pool)
+                .await?;
+            map_rows!(rows)
+        } else {
+            Vec::new()
+        };
+        Ok(rows)
+    }
+
+    /// Grant or negate a node for a user (upsert). `server` scopes it to
+    /// a backend; `None` is global.
+    pub async fn set_user_node(
+        &self,
+        uuid: Uuid,
+        node: &str,
+        value: bool,
+        server: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let uuid_str = uuid.hyphenated().to_string();
+        let v = i32::from(value);
+        if let Some(pool) = &self.mysql_pool {
+            sqlx::query(
+                "INSERT INTO lp_user_nodes (uuid, node, value, server) VALUES (?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE value = VALUES(value)",
+            )
+            .bind(&uuid_str)
+            .bind(node)
+            .bind(v)
+            .bind(server)
+            .execute(pool)
+            .await
+            .map(|_| ())
+        } else if let Some(pool) = &self.sqlite_pool {
+            sqlx::query(
+                "INSERT INTO lp_user_nodes (uuid, node, value, server) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(uuid, node, server) DO UPDATE SET value = excluded.value",
+            )
+            .bind(&uuid_str)
+            .bind(node)
+            .bind(v)
+            .bind(server)
+            .execute(pool)
+            .await
+            .map(|_| ())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Remove a user node (any server context matching `server`).
+    pub async fn delete_user_node(
+        &self,
+        uuid: Uuid,
+        node: &str,
+        server: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let uuid_str = uuid.hyphenated().to_string();
+        let sql = "DELETE FROM lp_user_nodes WHERE uuid = ? AND node = ? AND server IS ?";
+        if let Some(pool) = &self.mysql_pool {
+            // MySQL has no `IS ?` null-safe bind for plain `?`; use <=>.
+            sqlx::query("DELETE FROM lp_user_nodes WHERE uuid = ? AND node = ? AND server <=> ?")
+                .bind(&uuid_str)
+                .bind(node)
+                .bind(server)
+                .execute(pool)
+                .await
+                .map(|_| ())
+        } else if let Some(pool) = &self.sqlite_pool {
+            sqlx::query(sql)
+                .bind(&uuid_str)
+                .bind(node)
+                .bind(server)
+                .execute(pool)
+                .await
+                .map(|_| ())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Load all group inheritance edges as `(child, parent)` pairs.
+    pub async fn load_group_parents(&self) -> Result<Vec<(String, String)>, sqlx::Error> {
+        macro_rules! map_rows {
+            ($rows:expr) => {
+                $rows
+                    .into_iter()
+                    .map(|r| (r.get::<String, _>("child"), r.get::<String, _>("parent")))
+                    .collect()
+            };
+        }
+        let rows: Vec<(String, String)> = if let Some(pool) = &self.mysql_pool {
+            let rows = sqlx::query("SELECT child, parent FROM lp_group_parents")
+                .fetch_all(pool)
+                .await?;
+            map_rows!(rows)
+        } else if let Some(pool) = &self.sqlite_pool {
+            let rows = sqlx::query("SELECT child, parent FROM lp_group_parents")
+                .fetch_all(pool)
+                .await?;
+            map_rows!(rows)
+        } else {
+            Vec::new()
+        };
         Ok(rows)
     }
 

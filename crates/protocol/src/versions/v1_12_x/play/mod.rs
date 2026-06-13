@@ -56,11 +56,26 @@ mod packets {
     pub struct ClientboundJoinGame {
         pub entity_id: i32,
         pub gamemode: u8,
-        pub dimension: i32, // 1.12.2 uses an i32 (-1: Nether, 0: Overworld, 1: End)
+        pub dimension: i32, // 1.9.1+ uses an i32 (-1: Nether, 0: Overworld, 1: End)
         pub difficulty: u8,
         pub max_players: u8,
         pub level_type: String, // e.g., "default", "flat"
         pub reduced_debug_info: bool,
+        /// Negotiated protocol number for the destination client. Used only
+        /// by `encode` to pick the dimension wire width.
+        ///
+        /// Per ViaVersion `Protocol1_9To1_9_1` (`map(Types.BYTE, Types.INT)`
+        /// on the Login/JoinGame dimension), the dimension field was a single
+        /// signed `byte` in 1.9 (proto 107) and only widened to a 4-byte
+        /// `int` in 1.9.1-pre2 (proto 108). 1.8 (which shares this shape and
+        /// has no JoinGame rewriter) is likewise a byte. Sending the i32 form
+        /// to a proto-107 client makes it parse the packet with a byte
+        /// dimension, consume 3 bytes too few and disconnect with
+        /// "Packet 0/35 (gs) was larger than I expected, found 7 bytes extra".
+        ///
+        /// Defaults to `u32::MAX` ⇒ "use the modern (i32) shape" for callers
+        /// that don't know better.
+        pub for_proto: u32,
     }
 
     impl PacketId for ClientboundJoinGame {
@@ -77,8 +92,13 @@ mod packets {
             // 2. Gamemode (1 byte)
             dst.put_u8(self.gamemode);
 
-            // 3. Dimension (4 bytes)
-            dst.put_i32(self.dimension);
+            // 3. Dimension — byte on proto 107 (1.9.0 / shared 1.8 shape),
+            //    int on 1.9.1+ (proto ≥ 108). See `for_proto` docs.
+            if self.for_proto < 108 {
+                dst.put_i8(self.dimension as i8);
+            } else {
+                dst.put_i32(self.dimension);
+            }
 
             // 4. Difficulty (1 byte)
             dst.put_u8(self.difficulty);
@@ -148,6 +168,7 @@ mod packets {
                 max_players,
                 level_type,
                 reduced_debug_info,
+                for_proto: u32::MAX,
             })
         }
     }
@@ -763,4 +784,39 @@ mod packets {
     // ── ServerboundUpdateCommandBlock (0x21 in 1.12.2) ───────────────────────────
 
     // ── ServerboundUpdateCommandBlockMinecart (0x22 in 1.12.2) ───────────────────
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1.9.0 (proto 107) JoinGame dimension is a single signed byte; 1.9.1+
+    /// (proto ≥ 108) widened it to an i32. Getting this wrong makes proto-107
+    /// clients disconnect with "found 7 bytes extra whilst reading packet 35".
+    #[test]
+    fn join_game_dimension_width_by_proto() {
+        let make = |for_proto| ClientboundJoinGame {
+            entity_id: 0,
+            gamemode: 3,
+            dimension: 0,
+            difficulty: 0,
+            max_players: 20,
+            level_type: "flat".to_string(),
+            for_proto,
+            reduced_debug_info: false,
+        };
+
+        // Common bytes: eid(4) + gamemode(1) + difficulty(1) + maxplayers(1)
+        // + varint-len(1) + "flat"(4) + reduced_debug(1) = 13, plus dimension.
+        let mut byte_dim = BytesMut::new();
+        make(107).encode(&mut byte_dim).unwrap();
+        assert_eq!(byte_dim.len(), 13 + 1, "proto 107 → byte dimension");
+
+        let mut int_dim = BytesMut::new();
+        make(108).encode(&mut int_dim).unwrap();
+        assert_eq!(int_dim.len(), 13 + 4, "proto 108 → int dimension");
+
+        // The 7-byte gap is exactly what a proto-107 client reports.
+        assert_eq!(int_dim.len() - byte_dim.len(), 3);
+    }
 }

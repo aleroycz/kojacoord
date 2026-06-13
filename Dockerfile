@@ -1,5 +1,10 @@
 # Multi-stage build for Kojacoord Proxy
-FROM rust:1.85-slim AS builder
+# NOTE: keep this Rust version at or above the highest MSRV among our
+# transitive dependencies (e.g. time 0.3.47 needs 1.88, icu_provider
+# needs 1.86). The release CI builds binaries with the latest stable
+# toolchain, so the Docker builder must track it — pinning an old image
+# here is what broke the multi-arch image build (rustc 1.85 < 1.88).
+FROM rust:1.92-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
