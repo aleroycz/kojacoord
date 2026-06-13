@@ -487,58 +487,6 @@ impl NbtTag {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nbt_helpers() {
-        let mut nbt = Nbt::empty("test");
-        nbt.insert("name".to_string(), NbtTag::string("Steve"));
-        nbt.insert("level".to_string(), NbtTag::int(42));
-
-        assert_eq!(nbt.get_string("name"), Some("Steve"));
-        assert_eq!(nbt.get_int("level"), Some(42));
-        assert_eq!(nbt.len(), 2);
-        assert!(nbt.contains_key("name"));
-    }
-
-    #[test]
-    fn tag_conversions() {
-        let tag = NbtTag::string("hello");
-        assert_eq!(tag.as_string(), Some("hello"));
-        assert_eq!(tag.as_int(), None);
-
-        let tag = NbtTag::int(100);
-        assert_eq!(tag.as_int(), Some(100));
-        assert_eq!(tag.as_string(), None);
-    }
-
-    #[test]
-    fn skip_walks_past_empty_compound() {
-        // tag=Compound(10), name_len=0, then immediate End(0)
-        let raw: &[u8] = &[10, 0, 0, 0];
-        let mut buf = Bytes::copy_from_slice(raw);
-        skip(&mut buf).expect("skip");
-        assert_eq!(buf.remaining(), 0);
-    }
-
-    #[test]
-    fn skip_returns_err_on_truncated_input() {
-        let raw: &[u8] = &[10, 0]; // missing name_len trailing byte
-        let mut buf = Bytes::copy_from_slice(raw);
-        assert!(skip(&mut buf).is_err());
-    }
-
-    #[test]
-    fn skip_handles_explicit_end_at_top_level() {
-        let raw: &[u8] = &[0]; // bare TAG_End
-        let mut buf = Bytes::copy_from_slice(raw);
-        skip(&mut buf).expect("skip end");
-        assert_eq!(buf.remaining(), 0);
-    }
-}
-
 // The on-wire NBT used by JoinGame's dimension codec and a handful of other
 // 1.13+ packets is self-delimiting — but only if you decode it. When we
 // want to *step over* a codec without materialising the tree (e.g. when
@@ -649,4 +597,56 @@ fn need(cur: &mut Bytes, n: usize) -> Result<(), ProtocolError> {
     }
     cur.advance(n);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nbt_helpers() {
+        let mut nbt = Nbt::empty("test");
+        nbt.insert("name".to_string(), NbtTag::string("Steve"));
+        nbt.insert("level".to_string(), NbtTag::int(42));
+
+        assert_eq!(nbt.get_string("name"), Some("Steve"));
+        assert_eq!(nbt.get_int("level"), Some(42));
+        assert_eq!(nbt.len(), 2);
+        assert!(nbt.contains_key("name"));
+    }
+
+    #[test]
+    fn tag_conversions() {
+        let tag = NbtTag::string("hello");
+        assert_eq!(tag.as_string(), Some("hello"));
+        assert_eq!(tag.as_int(), None);
+
+        let tag = NbtTag::int(100);
+        assert_eq!(tag.as_int(), Some(100));
+        assert_eq!(tag.as_string(), None);
+    }
+
+    #[test]
+    fn skip_walks_past_empty_compound() {
+        // tag=Compound(10), name_len=0, then immediate End(0)
+        let raw: &[u8] = &[10, 0, 0, 0];
+        let mut buf = Bytes::copy_from_slice(raw);
+        skip(&mut buf).expect("skip");
+        assert_eq!(buf.remaining(), 0);
+    }
+
+    #[test]
+    fn skip_returns_err_on_truncated_input() {
+        let raw: &[u8] = &[10, 0]; // missing name_len trailing byte
+        let mut buf = Bytes::copy_from_slice(raw);
+        assert!(skip(&mut buf).is_err());
+    }
+
+    #[test]
+    fn skip_handles_explicit_end_at_top_level() {
+        let raw: &[u8] = &[0]; // bare TAG_End
+        let mut buf = Bytes::copy_from_slice(raw);
+        skip(&mut buf).expect("skip end");
+        assert_eq!(buf.remaining(), 0);
+    }
 }

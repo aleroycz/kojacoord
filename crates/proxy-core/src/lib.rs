@@ -29,6 +29,7 @@ pub mod routing;
 pub mod server;
 pub mod session;
 pub mod telemetry;
+pub mod version_check;
 
 pub mod control_plane;
 pub mod data;

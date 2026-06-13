@@ -34,6 +34,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("KojacoordProxy starting…");
 
+    // Best-effort update check against the KojaCraft release API. Spawned
+    // so a slow/unreachable network never delays startup.
+    tokio::spawn(async {
+        kojacoord_proxy_core::version_check::check_for_updates(env!("CARGO_PKG_VERSION")).await;
+    });
+
     // Standard startup flow: load config, initialise state, spawn background tasks.
     let config_path = std::env::args()
         .nth(1)

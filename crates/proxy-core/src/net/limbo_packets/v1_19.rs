@@ -467,9 +467,31 @@ impl LimboPackets for V1_19 {
         if pid == 0xFF {
             return None;
         }
-        let sections = if proto <= 756 { 16 } else { 24 };
+        // 1.17 / 1.17.1 (proto 755/756) predate the 1.18 combined chunk+light
+        // packet. They use the distinct 1.17 `LevelChunk` shape (section
+        // bitmask + chunk-level biomes + 1.16-format sections, no light), with
+        // light delivered separately via `light_update`. Sending the 1.18
+        // combined body to a 1.17 client makes it read the heightmap's TAG byte
+        // as the (missing) section-bitmask length and fail with
+        // "Can't read heightmap in packet for [0, 0]".
+        if proto <= 756 {
+            let body = super::void_chunk_body_1_17(16); // 1.17 overworld = 16 sections (256 high)
+            return Some(EncodedPacket { id: pid, body });
+        }
+        let sections = 24; // 1.18+ overworld = 384 high
         let body = super::void_chunk_body(sections, true, super::HeightmapFmt::NamedNbt);
         Some(EncodedPacket { id: pid, body })
+    }
+
+    fn light_update(&self, proto: u32) -> Option<EncodedPacket> {
+        // Standalone LightUpdate only for 1.17 / 1.17.1 (proto 755/756); 1.18+
+        // folds light into the combined chunk packet. Id 0x25 per ViaVersion
+        // `ClientboundPackets1_17::LIGHT_UPDATE`.
+        if !(755..=756).contains(&proto) {
+            return None;
+        }
+        let body = super::light_update_body_1_17(16);
+        Some(EncodedPacket { id: 0x25, body })
     }
 }
 
@@ -688,14 +710,7 @@ mod ship_check {
         use kojacoord_protocol::codec::Decode;
         use kojacoord_protocol::types::nbt::Nbt;
 
-        for (proto, want_sections) in [
-            (755u32, 16),
-            (758, 24),
-            (759, 24),
-            (760, 24),
-            (761, 24),
-            (762, 24),
-        ] {
+        for (proto, want_sections) in [(758u32, 24), (759, 24), (760, 24), (761, 24), (762, 24)] {
             // Every 1.18+ proto must also have a Set Center Chunk packet
             // or the client discards the chunk and hangs on loading.
             assert!(
@@ -736,6 +751,79 @@ mod ship_check {
             assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "block light arrays");
             assert_eq!(b.remaining(), 0, "proto {proto} chunk has trailing bytes");
         }
+    }
+
+    /// 1.17 / 1.17.1 (proto 755/756) must use the pre-1.18 `LevelChunk`
+    /// shape — section bitmask, chunk-level biomes, 1.16-format sections — and
+    /// fully consume. The missing bitmask was the "Can't read heightmap in
+    /// packet for [0, 0]" bug. Field order mirrors ViaVersion `ChunkType1_17`.
+    #[test]
+    fn proto_755_756_chunk_is_1_17_shape_and_parses() {
+        use bytes::Buf;
+        use kojacoord_protocol::codec::Decode;
+        use kojacoord_protocol::types::nbt::Nbt;
+
+        for proto in [755u32, 756] {
+            let pkt = V1_19.chunk_data(proto).expect("chunk built");
+            assert_eq!(pkt.id, 0x22, "1.17 LEVEL_CHUNK id");
+            let mut b = bytes::Bytes::copy_from_slice(&pkt.body);
+
+            assert_eq!(b.get_i32(), 0, "chunk x");
+            assert_eq!(b.get_i32(), 0, "chunk z");
+
+            // Section bitmask: long array, all 16 sections present.
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 1, "bitmask long count");
+            assert_eq!(b.get_i64(), 0xFFFF, "16 sections present");
+
+            // Heightmaps NBT (must decode straight after the bitmask).
+            Nbt::decode(&mut b).expect("heightmaps NBT");
+
+            // Chunk-level biomes: 16 sections × 64 = 1024 cells, all id 0.
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 1024, "biome cell count");
+            for _ in 0..1024 {
+                assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "biome id 0");
+            }
+
+            // Section data: 16 sections × (short + byte + VarInt(1) + VarInt(0)
+            // + VarInt(256) + 256×i64) = 16 × (2+1+1+1+2+2048) = 16 × 2055.
+            let cd_len = VarInt::decode(&mut b).unwrap().0 as usize;
+            assert_eq!(cd_len, 16 * 2055, "proto {proto} section data size");
+            b.advance(cd_len);
+
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "block entities");
+            assert_eq!(b.remaining(), 0, "proto {proto} chunk has trailing bytes");
+
+            // Light is a separate packet for 1.17.
+            let light = V1_19.light_update(proto).expect("1.17 light packet");
+            assert_eq!(light.id, 0x25, "1.17 LIGHT_UPDATE id");
+            let mut l = bytes::Bytes::copy_from_slice(&light.body);
+            assert_eq!(VarInt::decode(&mut l).unwrap().0, 0, "light x");
+            assert_eq!(VarInt::decode(&mut l).unwrap().0, 0, "light z");
+            assert_eq!(l.get_u8(), 1, "trust edges");
+            assert_eq!(VarInt::decode(&mut l).unwrap().0, 0, "skyLightMask");
+            assert_eq!(VarInt::decode(&mut l).unwrap().0, 0, "blockLightMask");
+            assert_eq!(
+                VarInt::decode(&mut l).unwrap().0,
+                1,
+                "emptySkyLightMask len"
+            );
+            assert_eq!(l.get_i64(), 0x3FFFF, "18 light sections empty");
+            assert_eq!(
+                VarInt::decode(&mut l).unwrap().0,
+                1,
+                "emptyBlockLightMask len"
+            );
+            assert_eq!(l.get_i64(), 0x3FFFF);
+            assert_eq!(VarInt::decode(&mut l).unwrap().0, 0, "sky light arrays");
+            assert_eq!(VarInt::decode(&mut l).unwrap().0, 0, "block light arrays");
+            assert_eq!(l.remaining(), 0, "proto {proto} light has trailing bytes");
+        }
+
+        // 1.18+ keeps light folded into the chunk — no standalone packet.
+        assert!(
+            V1_19.light_update(758).is_none(),
+            "1.18 has no separate light"
+        );
     }
 
     /// 1.19 / 1.19.2 sound = `[VarInt(24) name][VarInt cat][i32×3]`

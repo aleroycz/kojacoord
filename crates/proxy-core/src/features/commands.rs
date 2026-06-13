@@ -26,12 +26,15 @@ pub async fn handle_command(
     send_message: &mut impl FnMut(String),
 ) -> CommandResult {
     let trimmed = input.trim_start_matches('/');
-    if !is_proxy_command(trimmed) {
-        return CommandResult::NotACommand;
-    }
-
     let parts: Vec<&str> = trimmed.splitn(5, ' ').collect();
     let cmd = parts[0].to_lowercase();
+
+    // Built-in proxy commands take precedence; if it isn't one, fall
+    // through to plugin-registered commands before declaring it a
+    // backend command.
+    if !is_proxy_command(trimmed) {
+        return dispatch_plugin_command(&cmd, &parts, session, state, send_message).await;
+    }
 
     match cmd.as_str() {
         "ban" => handle_ban(parts, session, state, send_message).await,
@@ -45,6 +48,113 @@ pub async fn handle_command(
         "gplugins" => handle_plugins(state, send_message).await,
         "gtps" => handle_gtps(state, send_message).await,
         _ => CommandResult::NotACommand,
+    }
+}
+
+/// Route a non-built-in command to a plugin that registered it. Gates
+/// on the command's declared permission node (checked against the
+/// sender's role) before invoking the plugin, then acts on the
+/// plugin's response. Returns `NotACommand` if no plugin owns the
+/// label, so the caller forwards it to the backend as usual.
+async fn dispatch_plugin_command(
+    cmd: &str,
+    parts: &[&str],
+    session: SharedSession,
+    state: Arc<ProxyState>,
+    send_message: &mut impl FnMut(String),
+) -> CommandResult {
+    // Resolve the owning plugin + spec without holding the lock across
+    // the await points below.
+    let spec = {
+        let mgr = state
+            .plugin_manager
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        mgr.find_command(cmd).map(|(_, spec)| spec)
+    };
+    let Some(spec) = spec else {
+        return CommandResult::NotACommand;
+    };
+
+    let (uuid, name, rank, server) = {
+        let s = session.read().await;
+        (
+            s.uuid,
+            s.username.clone(),
+            s.rank.clone(),
+            s.current_server.clone(),
+        )
+    };
+
+    // Permission gate: a command with a declared node requires the
+    // sender to hold it. Resolved through the LuckPerms-shaped service
+    // (per-user nodes + group inheritance + server context), which
+    // falls back to role nodes when the user has no specific opinion.
+    if let Some(node) = &spec.permission {
+        if !state
+            .permissions
+            .has_permission(&uuid, &rank, node, server.as_deref())
+        {
+            send_message("§cYou don't have permission to use that.".to_owned());
+            return CommandResult::Handled;
+        }
+    }
+
+    let sender = kojacoord_plugin_system::CommandSender {
+        uuid: Some(uuid),
+        name,
+        // The proxy already gated the top-level node above; pass the
+        // role's wildcard so the plugin can self-gate sub-commands.
+        permissions: spec.permission.clone().into_iter().collect(),
+        is_console: false,
+    };
+    let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+
+    let response = {
+        let mgr = state
+            .plugin_manager
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        mgr.dispatch_command(cmd, &args, &sender)
+    };
+
+    match response {
+        Ok(Some(resp)) => {
+            apply_command_response(resp, uuid, &state, send_message).await;
+            CommandResult::Handled
+        },
+        Ok(None) => CommandResult::Handled,
+        Err(e) => {
+            tracing::warn!(command = cmd, error = %e, "plugin command handler errored");
+            send_message("§cThat command failed. Check the console for details.".to_owned());
+            CommandResult::Handled
+        },
+    }
+}
+
+/// Apply a plugin's [`PluginResponse`] from a command invocation.
+async fn apply_command_response(
+    resp: kojacoord_plugin_system::PluginResponse,
+    sender_uuid: uuid::Uuid,
+    state: &Arc<ProxyState>,
+    send_message: &mut impl FnMut(String),
+) {
+    use kojacoord_plugin_system::PluginResponse;
+    match resp {
+        PluginResponse::None | PluginResponse::Cancel => {},
+        PluginResponse::Message(msg) => send_message(msg),
+        PluginResponse::Broadcast(msg) => state.broadcast_system_message(&msg).await,
+        PluginResponse::KickPlayer { uuid, reason } => {
+            let json = serde_json::json!({ "text": reason, "color": "red" }).to_string();
+            state.kick_player(&uuid, &json).await;
+        },
+        PluginResponse::Custom(value) => {
+            tracing::debug!(?value, "plugin command returned a custom response");
+        },
+        PluginResponse::UpdatePlayerSample { .. } | PluginResponse::PermissionResult { .. } => {
+            // Not meaningful in a command context.
+            let _ = sender_uuid;
+        },
     }
 }
 

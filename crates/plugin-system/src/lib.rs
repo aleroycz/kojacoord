@@ -21,8 +21,9 @@ pub mod sandbox;
 pub mod wasm_loader;
 
 pub use api::{
-    PacketData, PacketDirection, PacketEvent, PacketFilter, PacketHookFn, PacketHookResult, Plugin,
-    PluginCommand, PluginContext, PluginEvent, PluginMetadata, PluginPermission, PluginResponse,
+    CommandSender, PacketData, PacketDirection, PacketEvent, PacketFilter, PacketHookFn,
+    PacketHookResult, Plugin, PluginActivity, PluginCommand, PluginCommandSpec, PluginContext,
+    PluginEvent, PluginEventKind, PluginMetadata, PluginPermission, PluginResponse, ALL_EVENTS,
 };
 pub use integrity::PluginVerifier;
 pub use manager::PluginManager;

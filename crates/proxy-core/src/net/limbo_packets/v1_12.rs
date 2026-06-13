@@ -22,6 +22,7 @@ impl LimboPackets for V1_12 {
                 max_players: 20,
                 level_type: "flat".to_string(),
                 reduced_debug_info: false,
+                for_proto: proto,
             },
         )
     }

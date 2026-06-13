@@ -38,6 +38,27 @@ const LIMBO_X: f64 = 0.0;
 const LIMBO_Y: f64 = 256.0;
 const LIMBO_Z: f64 = 0.0;
 
+/// Plugin-supplied overrides for the limbo experience. Held on
+/// [`ProxyState`] behind an `ArcSwap` and read once per limbo entry.
+/// Every field is optional; `None` keeps the built-in default. Plugins
+/// set this via [`kojacoord_plugin_system::PluginCommand::SetLimboCustomization`].
+#[derive(Debug, Clone, Default)]
+pub struct LimboCustomization {
+    /// Plaintext (legacy `§` codes allowed) chat line on limbo entry.
+    pub welcome_message: Option<String>,
+    /// Plaintext boss-bar title shown while waiting (1.9+).
+    pub bossbar_title: Option<String>,
+    /// Spawn coordinates inside limbo.
+    pub spawn: Option<(f64, f64, f64)>,
+}
+
+impl LimboCustomization {
+    /// The configured spawn, falling back to the built-in default.
+    fn spawn_xyz(&self) -> (f64, f64, f64) {
+        self.spawn.unwrap_or((LIMBO_X, LIMBO_Y, LIMBO_Z))
+    }
+}
+
 /// World name for the synthetic limbo dimension. Deliberately distinct
 /// from `minecraft:overworld` so that modern clients (1.16+) flush their
 /// chunk cache when they transition into limbo and again when they
@@ -283,6 +304,10 @@ impl<'a> LimboHandler<'a> {
         self.send_built(batch_start).await?;
         let chunk = self.packets.chunk_data(proto);
         self.send_built(chunk).await?;
+        // 1.17/1.17.1 deliver light in a separate LightUpdate packet (1.18+
+        // fold it into the chunk above; this returns None there).
+        let light = self.packets.light_update(proto);
+        self.send_built(light).await?;
         let batch_finished = self.packets.chunk_batch_finished(proto, 1);
         self.send_built(batch_finished).await?;
         let wait_chunks = self.packets.start_wait_chunks_event(proto);
@@ -573,10 +598,13 @@ impl<'a> LimboHandler<'a> {
     }
 
     async fn send_player_position(&mut self, teleport_id: i32) -> Result<(), ConnectionError> {
+        // Honour a plugin-supplied spawn override, falling back to the
+        // built-in limbo coordinates.
+        let (x, y, z) = self.state.limbo_customization.load().spawn_xyz();
         let pos = PlayerPos {
-            x: LIMBO_X,
-            y: LIMBO_Y,
-            z: LIMBO_Z,
+            x,
+            y,
+            z,
             yaw: 0.0,
             pitch: 0.0,
         };
@@ -587,8 +615,16 @@ impl<'a> LimboHandler<'a> {
     }
 
     async fn send_limbo_chat(&mut self) -> Result<(), ConnectionError> {
-        const MSG_JSON: &str = r#"{"text":"The server is currently offline. You have been placed in limbo and will be connected automatically when it comes back online.","color":"yellow"}"#;
-        let built = self.packets.chat(self.protocol_version, MSG_JSON);
+        const DEFAULT_MSG_JSON: &str = r#"{"text":"The server is currently offline. You have been placed in limbo and will be connected automatically when it comes back online.","color":"yellow"}"#;
+        // A plugin may override the welcome line. It's supplied as
+        // plaintext (legacy § codes allowed), so wrap it into a chat
+        // component; fall back to the built-in JSON when unset.
+        let custom = self.state.limbo_customization.load();
+        let msg_json = match &custom.welcome_message {
+            Some(text) => serde_json::json!({ "text": text }).to_string(),
+            None => DEFAULT_MSG_JSON.to_string(),
+        };
+        let built = self.packets.chat(self.protocol_version, &msg_json);
         self.send_built(built).await
     }
 
@@ -605,9 +641,16 @@ impl<'a> LimboHandler<'a> {
     }
 
     async fn send_bossbar_add(&mut self) -> Result<(), ConnectionError> {
-        let title = r#"{"text":"Waiting for server...","color":"yellow"}"#;
+        const DEFAULT_TITLE: &str = r#"{"text":"Waiting for server...","color":"yellow"}"#;
+        let custom = self.state.limbo_customization.load();
+        let title = match &custom.bossbar_title {
+            Some(text) => serde_json::json!({ "text": text }).to_string(),
+            None => DEFAULT_TITLE.to_string(),
+        };
         let uuid = Uuid::parse_str(BOSSBAR_UUID).unwrap();
-        let built = self.packets.bossbar_add(self.protocol_version, uuid, title);
+        let built = self
+            .packets
+            .bossbar_add(self.protocol_version, uuid, &title);
         self.send_built(built).await
     }
 
