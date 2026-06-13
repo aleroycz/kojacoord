@@ -63,7 +63,6 @@ impl PluginManager {
     /// assert!(manager.sandbox_enabled);
     /// ```
     pub fn new() -> Result<Self, anyhow::Error> {
-    pub fn new() -> Result<Self, anyhow::Error> {
         let wasm_loader = Arc::new(WasmLoader::new()?);
         Ok(Self {
             wasm_loader,
