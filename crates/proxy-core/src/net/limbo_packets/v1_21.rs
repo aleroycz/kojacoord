@@ -176,10 +176,10 @@ impl LimboPackets for V1_21 {
     fn set_center_chunk(&self, proto: u32) -> Option<EncodedPacket> {
         // Ids per ViaVersion `ClientboundPackets1_21*` ordinals.
         let id: u8 = match proto {
-            767 => 0x54,        // 1.21 / 1.21.1
-            768 | 769 => 0x58,  // 1.21.2 / 1.21.3 / 1.21.4
-            770 | 771 | 772 => 0x57, // 1.21.5 / 1.21.6 / 1.21.7 / 1.21.8
-            773 | 774 => 0x5c,  // 1.21.9 / 1.21.10 / 1.21.11
+            767 => 0x54,             // 1.21 / 1.21.1
+            768..=769 => 0x58,       // 1.21.2 / 1.21.3 / 1.21.4
+            770..=772 => 0x57, // 1.21.5 / 1.21.6 / 1.21.7 / 1.21.8
+            773..=774 => 0x5c,       // 1.21.9 / 1.21.10 / 1.21.11
             _ => return None,
         };
         let mut body = BytesMut::new();
@@ -206,7 +206,7 @@ impl LimboPackets for V1_21 {
 
     fn chunk_batch_start(&self, proto: u32) -> Option<EncodedPacket> {
         let id: u8 = match proto {
-            767 | 768 | 769 => 0x0d,
+            767..=769 => 0x0d,
             770..=774 => 0x0c,
             _ => return None,
         };
@@ -218,7 +218,7 @@ impl LimboPackets for V1_21 {
 
     fn chunk_batch_finished(&self, proto: u32, batch_size: i32) -> Option<EncodedPacket> {
         let id: u8 = match proto {
-            767 | 768 | 769 => 0x0c,
+            767..=769 => 0x0c,
             770..=774 => 0x0b,
             _ => return None,
         };
@@ -231,9 +231,9 @@ impl LimboPackets for V1_21 {
         // GameEvent 13 — `[u8 event][f32 value]`.
         let id: u8 = match proto {
             767 => 0x22,             // 1.21 / 1.21.1
-            768 | 769 => 0x23,       // 1.21.2 / 1.21.3 / 1.21.4
-            770 | 771 | 772 => 0x22, // 1.21.5 / 1.21.6 / 1.21.7 / 1.21.8
-            773 | 774 => 0x26,       // 1.21.9 / 1.21.10 / 1.21.11
+            768..=769 => 0x23,       // 1.21.2 / 1.21.3 / 1.21.4
+            770..=772 => 0x22, // 1.21.5 / 1.21.6 / 1.21.7 / 1.21.8
+            773..=774 => 0x26,       // 1.21.9 / 1.21.10 / 1.21.11
             _ => return None,
         };
         let mut body = BytesMut::new();

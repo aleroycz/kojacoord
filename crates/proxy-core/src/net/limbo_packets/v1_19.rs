@@ -274,8 +274,7 @@ impl LimboPackets for V1_19 {
         // field shifted by one byte and over-ran `seed` at the end
         // (`readerIndex(53)+length(8) exceeds writerIndex(56)`). Hand-
         // encode the holder with the option byte present.
-        let pid =
-            kojacoord_protocol::versions::v1_21_x::play::ClientboundSound::packet_id(proto);
+        let pid = kojacoord_protocol::versions::v1_21_x::play::ClientboundSound::packet_id(proto);
         if pid == 0xFF {
             return None;
         }
@@ -345,7 +344,7 @@ impl LimboPackets for V1_19 {
         // `ClientboundPackets1_19_3`). Must precede the void chunk or the
         // client discards it and stays on "Loading terrain".
         let id: u8 = match proto {
-            755 | 756 | 757 | 758 => 0x49, // 1.17 / 1.17.1 / 1.18 / 1.18.2
+            755..=758 => 0x49, // 1.17 / 1.17.1 / 1.18 / 1.18.2
             759 => 0x48,                   // 1.19
             760 => 0x4b,                   // 1.19.1 / 1.19.2
             761 => 0x4a,                   // 1.19.3
@@ -400,9 +399,11 @@ fn build_join_game_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedP
     // Inline dimension MUST match the registry's overworld element
     // byte-for-byte (same #infiniburn / min_y / height) or the 1.18.x
     // client's strict DimensionType codec rejects it.
-    let dimension_nbt =
-        crate::protocol::dimension_codec::inline_dimension_nbt_for_proto("minecraft:overworld", proto)
-            .ok()?;
+    let dimension_nbt = crate::protocol::dimension_codec::inline_dimension_nbt_for_proto(
+        "minecraft:overworld",
+        proto,
+    )
+    .ok()?;
 
     let mut body = BytesMut::new();
     body.put_i32(0); // entity_id
@@ -452,9 +453,11 @@ fn build_respawn_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedPac
     if pid == 0xFF {
         return None;
     }
-    let dimension_nbt =
-        crate::protocol::dimension_codec::inline_dimension_nbt_for_proto("minecraft:overworld", proto)
-            .ok()?;
+    let dimension_nbt = crate::protocol::dimension_codec::inline_dimension_nbt_for_proto(
+        "minecraft:overworld",
+        proto,
+    )
+    .ok()?;
 
     let mut body = BytesMut::new();
     body.put_slice(&dimension_nbt);
@@ -576,9 +579,14 @@ mod ship_check {
         use kojacoord_protocol::codec::Decode;
         use kojacoord_protocol::types::nbt::Nbt;
 
-        for (proto, want_sections) in
-            [(755u32, 16), (758, 24), (759, 24), (760, 24), (761, 24), (762, 24)]
-        {
+        for (proto, want_sections) in [
+            (755u32, 16),
+            (758, 24),
+            (759, 24),
+            (760, 24),
+            (761, 24),
+            (762, 24),
+        ] {
             // Every 1.18+ proto must also have a Set Center Chunk packet
             // or the client discards the chunk and hangs on loading.
             assert!(
@@ -599,9 +607,21 @@ mod ship_check {
             assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "skyLightMask");
             assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "blockLightMask");
             let expected = ((1u64 << (want_sections + 2)) - 1) as i64;
-            assert_eq!(VarInt::decode(&mut b).unwrap().0, 1, "emptySkyLightMask len");
-            assert_eq!(b.get_i64(), expected, "emptySkyLightMask covers all sections");
-            assert_eq!(VarInt::decode(&mut b).unwrap().0, 1, "emptyBlockLightMask len");
+            assert_eq!(
+                VarInt::decode(&mut b).unwrap().0,
+                1,
+                "emptySkyLightMask len"
+            );
+            assert_eq!(
+                b.get_i64(),
+                expected,
+                "emptySkyLightMask covers all sections"
+            );
+            assert_eq!(
+                VarInt::decode(&mut b).unwrap().0,
+                1,
+                "emptyBlockLightMask len"
+            );
             assert_eq!(b.get_i64(), expected);
             assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "sky light arrays");
             assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "block light arrays");

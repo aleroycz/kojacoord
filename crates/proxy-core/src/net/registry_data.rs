@@ -68,12 +68,12 @@ static REGISTRIES_1_21_11: &[u8] =
 /// JoinGame directly).
 pub fn bundle_for_proto(proto: u32) -> Option<&'static [u8]> {
     match proto {
-        766 => Some(REGISTRIES_1_20_5),       // 1.20.5 / 1.20.6
-        767 => Some(REGISTRIES_1_21),         // 1.21 / 1.21.1
-        768 | 769 => Some(REGISTRIES_1_21_3), // 1.21.2 / 1.21.3 / 1.21.4
-        770 => Some(REGISTRIES_1_21_5),       // 1.21.5
-        771 | 772 | 773 => Some(REGISTRIES_1_21_6), // 1.21.6 – 1.21.9
-        774 => Some(REGISTRIES_1_21_11),      // 1.21.10 / 1.21.11
+        766 => Some(REGISTRIES_1_20_5),             // 1.20.5 / 1.20.6
+        767 => Some(REGISTRIES_1_21),               // 1.21 / 1.21.1
+        768..=769 => Some(REGISTRIES_1_21_3),       // 1.21.2 / 1.21.3 / 1.21.4
+        770 => Some(REGISTRIES_1_21_5),             // 1.21.5
+        771..=773 => Some(REGISTRIES_1_21_6), // 1.21.6 – 1.21.9
+        774 => Some(REGISTRIES_1_21_11),            // 1.21.10 / 1.21.11
         // Anything past the highest protocol we have data for reuses the
         // newest complete set as a logged best-effort.
         p if p > 774 => Some(REGISTRIES_1_21_11),

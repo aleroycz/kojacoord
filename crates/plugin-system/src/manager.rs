@@ -182,7 +182,7 @@ impl PluginManager {
                     guard.metadata.clone()
                 };
                 (Box::new(adapter) as Box<dyn Plugin>, metadata)
-            }
+            },
             "dll" | "so" | "dylib" => self
                 .native_loader
                 .load_plugin(path, &context)
@@ -193,14 +193,14 @@ impl PluginManager {
                 self.native_loader
                     .load_plugin(&lib_path, &context)
                     .context("Failed to load native plugin from .kpl")?
-            }
+            },
             other => {
                 return Err(anyhow::anyhow!(
                     "Unsupported plugin extension '{}' for {}",
                     other,
                     path.display()
                 ));
-            }
+            },
         };
 
         if metadata.name != plugin_name {
@@ -294,12 +294,15 @@ impl PluginManager {
 
             // Load WASM (sandboxed) and native (.dll/.so/.dylib or a .kpl
             // archive wrapping one) plugins. Everything else is ignored.
-            let is_plugin = path.extension().and_then(|e| e.to_str()).is_some_and(|ext| {
-                matches!(
-                    ext.to_ascii_lowercase().as_str(),
-                    "wasm" | "dll" | "so" | "dylib" | "kpl"
-                )
-            });
+            let is_plugin = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "wasm" | "dll" | "so" | "dylib" | "kpl"
+                    )
+                });
             if is_plugin {
                 let plugin_name = path
                     .file_stem()
@@ -337,7 +340,10 @@ impl PluginManager {
             let mut zfile = archive.by_index(i)?;
             // Guard against zip-slip: only use the file name, never any path
             // components the archive might carry.
-            let name = match zfile.enclosed_name().and_then(|p| p.file_name().map(|f| f.to_owned())) {
+            let name = match zfile
+                .enclosed_name()
+                .and_then(|p| p.file_name().map(|f| f.to_owned()))
+            {
                 Some(n) => n,
                 None => continue,
             };

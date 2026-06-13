@@ -373,14 +373,18 @@ mod chunk_tests {
         }
         assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // skyLightMask (no data)
         assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // blockLightMask
-        // emptySkyLightMask: 1 long covering all `sections + 2` light sections
+                                                          // emptySkyLightMask: 1 long covering all `sections + 2` light sections
         assert_eq!(VarInt::decode(&mut b).unwrap().0, 1);
         let expected = if sections + 2 >= 64 {
             -1i64
         } else {
             ((1u64 << (sections + 2)) - 1) as i64
         };
-        assert_eq!(b.get_i64(), expected, "emptySkyLightMask covers all sections");
+        assert_eq!(
+            b.get_i64(),
+            expected,
+            "emptySkyLightMask covers all sections"
+        );
         assert_eq!(VarInt::decode(&mut b).unwrap().0, 1); // emptyBlockLightMask
         assert_eq!(b.get_i64(), expected);
         assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // sky light arrays
@@ -434,12 +438,24 @@ mod chunk_tests {
     fn v1_20_v1_21_chunk_and_center_build() {
         // Every modern proto must yield a chunk + center packet.
         for proto in [763u32, 764, 765, 766] {
-            assert!(v1_20::V1_20.chunk_data(proto).is_some(), "v1_20 chunk {proto}");
-            assert!(v1_20::V1_20.set_center_chunk(proto).is_some(), "v1_20 center {proto}");
+            assert!(
+                v1_20::V1_20.chunk_data(proto).is_some(),
+                "v1_20 chunk {proto}"
+            );
+            assert!(
+                v1_20::V1_20.set_center_chunk(proto).is_some(),
+                "v1_20 center {proto}"
+            );
         }
         for proto in [767u32, 768, 769, 770, 771, 772, 773, 774] {
-            assert!(v1_21::V1_21.chunk_data(proto).is_some(), "v1_21 chunk {proto}");
-            assert!(v1_21::V1_21.set_center_chunk(proto).is_some(), "v1_21 center {proto}");
+            assert!(
+                v1_21::V1_21.chunk_data(proto).is_some(),
+                "v1_21 chunk {proto}"
+            );
+            assert!(
+                v1_21::V1_21.set_center_chunk(proto).is_some(),
+                "v1_21 center {proto}"
+            );
         }
         // batching only 764+, game event only 765+
         assert!(v1_20::V1_20.chunk_batch_start(763).is_none());

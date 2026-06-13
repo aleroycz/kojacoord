@@ -339,11 +339,10 @@ fn augment_for_schema(element: NbtTag, schema: DimSchema) -> NbtTag {
     NbtTag::Compound(m)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
- 
+
     #[test]
     fn codec_encodes_to_nonempty() {
         let buf = dimension_codec_nbt().unwrap();
@@ -351,7 +350,7 @@ mod tests {
         // Root NBT form: first byte is the Compound tag (10).
         assert_eq!(buf[0], 10);
     }
- 
+
     #[test]
     fn dimension_type_nether_has_no_skylight() {
         let buf = dimension_type_nbt("minecraft:the_nether").unwrap();
@@ -365,14 +364,14 @@ mod tests {
         assert_eq!(buf[0], 10);
         assert!(buf[1] == 0 && buf[2] == 0);
     }
- 
+
     #[test]
     fn dimension_type_1_18_2_matches_1_17_field_set() {
         let v117 = dimension_type_nbt_for_proto("minecraft:overworld", 756).unwrap();
         let v1182 = dimension_type_nbt_for_proto("minecraft:overworld", 758).unwrap();
         assert_eq!(v117.len(), v1182.len());
     }
- 
+
     #[test]
     fn dimension_type_1_18_2_differs_from_1_16_2() {
         let v1162 = dimension_type_nbt_for_proto("minecraft:overworld", 754).unwrap();
@@ -380,8 +379,8 @@ mod tests {
         // 1.18.2 has two extra Int fields (min_y, height) vs 1.16.2.
         assert!(v1182.len() > v1162.len());
     }
- 
-   #[test]
+
+    #[test]
     fn dimension_type_nbt_matches_raw_nbt_encode_for_same_compound() {
         // `dimension_type_nbt` must produce exactly the same bytes as
         // `Nbt::encode` for the equivalent compound — there is no separate
@@ -390,13 +389,24 @@ mod tests {
         let actual = dimension_type_nbt("minecraft:overworld").unwrap();
 
         let mut root = HashMap::new();
-        if let NbtTag::Compound(m) =
-            augment_for_schema(dimension_type_element(true, false, false, true,
-                "minecraft:infiniburn_overworld", "minecraft:overworld", false), DimSchema::V1_16_2)
-        {
+        if let NbtTag::Compound(m) = augment_for_schema(
+            dimension_type_element(
+                true,
+                false,
+                false,
+                true,
+                "minecraft:infiniburn_overworld",
+                "minecraft:overworld",
+                false,
+            ),
+            DimSchema::V1_16_2,
+        ) {
             root = m;
         }
-        let nbt = Nbt { name: String::new(), root };
+        let nbt = Nbt {
+            name: String::new(),
+            root,
+        };
         let mut expected = BytesMut::new();
         nbt.encode(&mut expected).unwrap();
 

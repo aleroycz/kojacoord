@@ -266,7 +266,7 @@ impl LimboPackets for V1_20 {
     fn chunk_batch_start(&self, proto: u32) -> Option<EncodedPacket> {
         // 1.20.2+ only; empty body.
         let id: u8 = match proto {
-            764 | 765 | 766 => 0x0d,
+            764..=766 => 0x0d,
             _ => return None,
         };
         Some(EncodedPacket {
@@ -277,7 +277,7 @@ impl LimboPackets for V1_20 {
 
     fn chunk_batch_finished(&self, proto: u32, batch_size: i32) -> Option<EncodedPacket> {
         let id: u8 = match proto {
-            764 | 765 | 766 => 0x0c,
+            764..=766 => 0x0c,
             _ => return None,
         };
         let mut body = BytesMut::new();

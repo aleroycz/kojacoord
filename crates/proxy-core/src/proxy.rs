@@ -999,12 +999,15 @@ impl ProxyState {
                 };
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
-                    let is_plugin = path.extension().and_then(|e| e.to_str()).is_some_and(|ext| {
-                        matches!(
-                            ext.to_ascii_lowercase().as_str(),
-                            "dll" | "so" | "dylib" | "kpl" | "wasm"
-                        )
-                    });
+                    let is_plugin = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|ext| {
+                            matches!(
+                                ext.to_ascii_lowercase().as_str(),
+                                "dll" | "so" | "dylib" | "kpl" | "wasm"
+                            )
+                        });
                     if !is_plugin {
                         continue;
                     }

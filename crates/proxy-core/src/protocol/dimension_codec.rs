@@ -873,7 +873,8 @@ mod ship_check {
             "1.19 codec MUST contain minecraft:chat_type registry"
         );
         assert!(
-            out.windows(monster_spawn_light.len()).any(|w| w == monster_spawn_light),
+            out.windows(monster_spawn_light.len())
+                .any(|w| w == monster_spawn_light),
             "1.19 codec MUST contain monster_spawn_light_level on dim elements"
         );
         assert!(
@@ -913,7 +914,9 @@ mod ship_check {
         assert!(biomes.len() >= 60, "real 1.19 biome set is ~63 entries");
         let mut saw_the_void = false;
         for entry in biomes {
-            let NbtTag::Compound(entry_map) = entry else { continue };
+            let NbtTag::Compound(entry_map) = entry else {
+                continue;
+            };
             if let Some(NbtTag::String(name)) = entry_map.get("name") {
                 if name == "minecraft:the_void" {
                     saw_the_void = true;
@@ -947,7 +950,9 @@ mod ship_check {
             panic!("dim value not a list");
         };
         for entry in dims {
-            let NbtTag::Compound(entry_map) = entry else { continue };
+            let NbtTag::Compound(entry_map) = entry else {
+                continue;
+            };
             let Some(NbtTag::Compound(element)) = entry_map.get("element") else {
                 continue;
             };
@@ -1032,8 +1037,7 @@ mod ship_check {
 
             // biome depth/scale are gone from 1.18 (proto 757); category
             // is gone from 1.19 (proto 759). Verify the strip-by-version.
-            let NbtTag::Compound(biome_reg) =
-                nbt.root.get("minecraft:worldgen/biome").unwrap()
+            let NbtTag::Compound(biome_reg) = nbt.root.get("minecraft:worldgen/biome").unwrap()
             else {
                 panic!("proto {proto} biome registry not compound");
             };
@@ -1041,7 +1045,9 @@ mod ship_check {
                 panic!("proto {proto} biome value not list");
             };
             for entry in biomes {
-                let NbtTag::Compound(em) = entry else { continue };
+                let NbtTag::Compound(em) = entry else {
+                    continue;
+                };
                 let Some(NbtTag::Compound(el)) = em.get("element") else {
                     continue;
                 };
