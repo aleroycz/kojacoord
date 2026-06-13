@@ -415,7 +415,7 @@ impl LimboPackets for V1_19 {
     /// - 760 → 0x4b
     /// - 761 → 0x4a
     /// - 762 → 0x4e
-    /// Returns `None` for unsupported protocol versions. The packet body contains two VarInts (chunk x and chunk z), both zero.
+    ///   Returns `None` for unsupported protocol versions. The packet body contains two VarInts (chunk x and chunk z), both zero.
     ///
     /// # Examples
     ///
