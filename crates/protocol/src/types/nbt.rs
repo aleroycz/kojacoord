@@ -539,8 +539,6 @@ mod tests {
     }
 }
 
-// ── Skipper ──────────────────────────────────────────────────────────────
-//
 // The on-wire NBT used by JoinGame's dimension codec and a handful of other
 // 1.13+ packets is self-delimiting — but only if you decode it. When we
 // want to *step over* a codec without materialising the tree (e.g. when

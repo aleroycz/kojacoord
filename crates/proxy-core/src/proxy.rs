@@ -932,19 +932,19 @@ impl ProxyState {
         });
     }
 
-    /// Watch `plugins.plugin_dir` for changes and run the reload processor.
+    /// Watch the configured plugins directory for new or modified plugin artifacts and enqueue reloads.
     ///
-    /// Two background tasks are spawned:
-    ///   1. A poll-based watcher that scans the plugin directory with
-    ///      `tokio::fs::read_dir` (so the runtime worker isn't blocked on
-    ///      synchronous I/O) and sends reload requests through
-    ///      `hot_reload_tx` when a known plugin file's mtime advances.
-    ///   2. A processor that drains those requests and applies them on a
-    ///      blocking thread (the plugin manager's `std::sync::RwLock`
-    ///      contains a non-`Send` wasmtime guard, so we can't hold it
-    ///      across awaits).
+    /// Spawns two background tasks: a poll-based directory watcher that detects changes to files with
+    /// extensions `dll`, `so`, `dylib`, `kpl`, or `wasm` and a processor that applies reloads on a
+    /// blocking thread. The function returns immediately and is a no-op when hot-reload is disabled,
+    /// the plugin directory is unset, or the watcher has already been started.
     ///
-    /// No-op when `plugins.hot_reload = false` or the directory isn't set.
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `state: std::sync::Arc<ProxyState>` is initialized and plugin hot-reload is enabled:
+    /// state.start_plugin_hot_reload_watcher();
+    /// ```
     pub fn start_plugin_hot_reload_watcher(self: &Arc<Self>) {
         if !self.config.plugins.enabled || !self.config.plugins.hot_reload {
             return;
@@ -1001,7 +1001,13 @@ impl ProxyState {
                     let path = entry.path();
                     let is_plugin = path
                         .extension()
-                        .is_some_and(|ext| ext == "dll" || ext == "so" || ext == "dylib");
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|ext| {
+                            matches!(
+                                ext.to_ascii_lowercase().as_str(),
+                                "dll" | "so" | "dylib" | "kpl" | "wasm"
+                            )
+                        });
                     if !is_plugin {
                         continue;
                     }

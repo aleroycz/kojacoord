@@ -10,6 +10,7 @@ use crate::api::{
     PacketData, PacketEvent, PacketHookResult, Plugin, PluginCommand, PluginContext, PluginEvent,
     PluginMetadata, PluginPermission, PluginResponse,
 };
+use crate::native_loader::PluginLoader;
 use crate::sandbox::{apply_sandbox, SandboxConfig};
 use crate::wasm_loader::{WasmLoader, WasmPluginAdapter};
 use anyhow::{Context, Result};
@@ -24,6 +25,9 @@ pub type SharedPlugin = Arc<Mutex<Box<dyn Plugin>>>;
 
 pub struct PluginManager {
     wasm_loader: Arc<WasmLoader>,
+    /// Loader for native `.dll`/`.so`/`.dylib`/`.kpl` plugins. Holds the mapped
+    /// library handles for the lifetime of their plugin instances.
+    native_loader: PluginLoader,
     plugins: HashMap<String, (SharedPlugin, PluginMetadata)>,
     plugin_configs: HashMap<String, PluginContext>,
     packet_hooks: Arc<RwLock<Vec<PacketEvent>>>,
@@ -35,13 +39,34 @@ pub struct PluginManager {
     /// channel so the proxy can route responses per plugin if needed.
     pub command_receivers:
         std::sync::Mutex<HashMap<String, tokio::sync::mpsc::UnboundedReceiver<PluginCommand>>>,
+    /// Handle to the host's long-lived tokio runtime, handed to native plugins
+    /// so the tasks they spawn outlive a single load call. Captured at
+    /// construction (when built inside the runtime); hot-reload runs under a
+    /// throwaway current-thread runtime, so relying on `Handle::try_current()`
+    /// alone there would let plugin tasks die. See [`Self::set_runtime_handle`].
+    runtime_handle: Option<tokio::runtime::Handle>,
 }
 
 impl PluginManager {
+    /// Creates a new PluginManager with default configuration and initialized loaders.
+    ///
+    /// The returned manager has sandboxing enabled by default, an empty plugin registry and
+    /// packet hook table, a freshly constructed WASM loader and native plugin loader, and
+    /// attempts to capture the current Tokio runtime handle if one is available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use plugin_system::manager::PluginManager;
+    ///
+    /// let manager = PluginManager::new().expect("failed to create PluginManager");
+    /// assert!(manager.sandbox_enabled);
+    /// ```
     pub fn new() -> Result<Self, anyhow::Error> {
         let wasm_loader = Arc::new(WasmLoader::new()?);
         Ok(Self {
             wasm_loader,
+            native_loader: PluginLoader::new(),
             plugins: HashMap::new(),
             plugin_configs: HashMap::new(),
             packet_hooks: Arc::new(RwLock::new(Vec::new())),
@@ -49,13 +74,27 @@ impl PluginManager {
             sandbox_config: SandboxConfig::default(),
             allowed_permissions: HashMap::new(),
             command_receivers: std::sync::Mutex::new(HashMap::new()),
+            runtime_handle: tokio::runtime::Handle::try_current().ok(),
         })
     }
 
-    /// Create a new PluginManager with a custom WASM loader
+    /// Creates a PluginManager using the provided WASM loader.
+    ///
+    /// The returned manager is initialized with empty plugin/state maps, an empty
+    /// packet hook table, sandboxing enabled with a default configuration, and
+    /// an optional Tokio runtime handle if one is currently available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let wasm_loader = WasmLoader::new();
+    /// let manager = PluginManager::with_wasm_loader(wasm_loader).expect("create manager");
+    /// assert!(manager.sandbox_enabled);
+    /// ```
     pub fn with_wasm_loader(wasm_loader: WasmLoader) -> Result<Self, anyhow::Error> {
         Ok(Self {
             wasm_loader: Arc::new(wasm_loader),
+            native_loader: PluginLoader::new(),
             plugins: HashMap::new(),
             plugin_configs: HashMap::new(),
             packet_hooks: Arc::new(RwLock::new(Vec::new())),
@@ -63,10 +102,41 @@ impl PluginManager {
             sandbox_config: SandboxConfig::default(),
             allowed_permissions: HashMap::new(),
             command_receivers: std::sync::Mutex::new(HashMap::new()),
+            runtime_handle: tokio::runtime::Handle::try_current().ok(),
         })
     }
 
-    /// Set the allowed permissions for a specific plugin from config
+    /// Sets the Tokio runtime handle used to anchor tasks spawned by native plugins.
+    ///
+    /// Use this from inside the host's main runtime when the manager was constructed
+    /// off that runtime so plugin-spawned tasks are tied to a handle that outlives
+    /// the loader.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Called from inside a Tokio runtime:
+    /// let handle = tokio::runtime::Handle::try_current().expect("inside runtime");
+    /// let mut manager = PluginManager::new().expect("create manager");
+    /// manager.set_runtime_handle(handle);
+    /// ```
+    pub fn set_runtime_handle(&mut self, handle: tokio::runtime::Handle) {
+        self.runtime_handle = Some(handle);
+    }
+
+    /// Configure the permission allowlist for a plugin by name.
+    ///
+    /// The provided list will replace any existing allowlist for the plugin.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// // assume PluginManager and PluginPermission are in scope
+    /// let mut mgr = PluginManager::new().unwrap();
+    /// let perms = vec![PluginPermission::Network, PluginPermission::Filesystem];
+    /// mgr.set_allowed_permissions("example_plugin".to_string(), perms);
+    /// ```
     pub fn set_allowed_permissions(
         &mut self,
         plugin_name: String,
@@ -103,6 +173,35 @@ impl PluginManager {
         }
     }
 
+    /// Loads a plugin file, activates it, registers its packet hooks, and returns its metadata.
+    ///
+    /// Loads a plugin from the filesystem (WASM, native dynamic library, or `.kpl` archive),
+    /// enforces the plugin's declared permissions against the manager's allowlist, runs the
+    /// plugin's enable lifecycle, and registers any packet hooks the plugin provides.
+    ///
+    /// # Parameters
+    ///
+    /// - `path`: Filesystem path to the plugin file. Supported extensions: `wasm`, `dll`, `so`,
+    ///   `dylib`, and `kpl` (zip archive containing a native library).
+    /// - `config`: Per-plugin configuration map passed into the plugin's `PluginContext`.
+    ///
+    /// # Returns
+    ///
+    /// `PluginMetadata` for the loaded plugin on success; an error if loading fails, the plugin
+    /// requests disallowed permissions, or the extension is unsupported.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::collections::HashMap;
+    /// # async fn _example() -> anyhow::Result<()> {
+    /// let mut manager = PluginManager::new()?;
+    /// let meta = manager
+    ///     .load_plugin("examples/my_plugin.wasm", HashMap::new())
+    ///     .await?;
+    /// assert!(!meta.name.is_empty());
+    /// # Ok(()) }
+    /// ```
     pub async fn load_plugin<P: AsRef<Path>>(
         &mut self,
         path: P,
@@ -122,28 +221,65 @@ impl PluginManager {
             version: "1.0.0".to_string(),
             config,
             command_tx: Some(cmd_tx),
+            // Native plugins are mapped across a dylib boundary and don't share
+            // the host's ambient tokio runtime, so hand them an explicit handle.
+            // Prefer the manager's captured long-lived handle (survives a
+            // hot-reload's throwaway runtime); fall back to the current one.
+            runtime_handle: self
+                .runtime_handle
+                .clone()
+                .or_else(|| tokio::runtime::Handle::try_current().ok()),
         };
 
-        // Only load WASM plugins
-        let wasm_bytes = std::fs::read(path).context("Failed to read WASM file")?;
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
 
-        let wasm_instance = self
-            .wasm_loader
-            .load_plugin(
-                plugin_name.clone(),
-                "1.0.0".to_string(),
-                wasm_bytes,
-                &context,
-            )
-            .await
-            .context("Failed to load WASM plugin")?;
-
-        let adapter = WasmPluginAdapter::new(wasm_instance.clone(), self.wasm_loader.clone());
-        let metadata = {
-            let guard = wasm_instance.lock().unwrap();
-            guard.metadata.clone()
+        // Dispatch on file type: WASM runs sandboxed; native libraries (.dll/
+        // .so/.dylib, or a .kpl archive wrapping one) run with full privileges
+        // behind the integrity allowlist.
+        let (mut plugin, metadata): (Box<dyn Plugin>, PluginMetadata) = match ext.as_str() {
+            "wasm" => {
+                let wasm_bytes = std::fs::read(path).context("Failed to read WASM file")?;
+                let wasm_instance = self
+                    .wasm_loader
+                    .load_plugin(
+                        plugin_name.clone(),
+                        "1.0.0".to_string(),
+                        wasm_bytes,
+                        &context,
+                    )
+                    .await
+                    .context("Failed to load WASM plugin")?;
+                let adapter =
+                    WasmPluginAdapter::new(wasm_instance.clone(), self.wasm_loader.clone());
+                let metadata = {
+                    let guard = wasm_instance.lock().unwrap();
+                    guard.metadata.clone()
+                };
+                (Box::new(adapter) as Box<dyn Plugin>, metadata)
+            },
+            "dll" | "so" | "dylib" => self
+                .native_loader
+                .load_plugin(path, &context)
+                .context("Failed to load native plugin")?,
+            "kpl" => {
+                let lib_path = Self::extract_kpl_library(path)
+                    .context("Failed to extract native library from .kpl archive")?;
+                self.native_loader
+                    .load_plugin(&lib_path, &context)
+                    .context("Failed to load native plugin from .kpl")?
+            },
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported plugin extension '{}' for {}",
+                    other,
+                    path.display()
+                ));
+            },
         };
-        let mut plugin = Box::new(adapter) as Box<dyn Plugin>;
 
         if metadata.name != plugin_name {
             log::warn!(
@@ -202,7 +338,7 @@ impl PluginManager {
         }
 
         log::info!(
-            "Loaded WASM plugin: {} v{} by {}",
+            "Loaded plugin: {} v{} by {}",
             metadata.name,
             metadata.version,
             metadata.author
@@ -210,6 +346,33 @@ impl PluginManager {
         Ok(metadata)
     }
 
+    /// Scans a directory for supported plugin files and attempts to load each found plugin.
+    ///
+    /// The directory is scanned for files with extensions `wasm`, `dll`, `so`, `dylib`, or `kpl`.
+    /// For each matching file the function derives a plugin name from the file stem, looks up
+    /// an optional per-plugin configuration in `configs`, and calls `load_plugin` for that file.
+    /// Individual plugin load failures are logged and do not stop the scan.
+    ///
+    /// # Parameters
+    ///
+    /// - `dir`: Filesystem path to search for plugin files. Paths containing `..` are rejected.
+    /// - `configs`: Map from plugin name to that plugin's configuration map (`HashMap<String, String>`).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success. Returns an error if the directory cannot be read or other I/O errors occur while iterating the directory.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::collections::HashMap;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let mut manager = PluginManager::new()?; // assumed in scope
+    /// let configs: HashMap<String, HashMap<String, String>> = HashMap::new();
+    /// manager.load_plugins_from_dir("plugins", configs).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn load_plugins_from_dir<P: AsRef<Path>>(
         &mut self,
         dir: P,
@@ -234,8 +397,18 @@ impl PluginManager {
             let entry = entry?;
             let path = entry.path();
 
-            // Only load WASM plugins
-            if path.extension().is_some_and(|ext| ext == "wasm") {
+            // Load WASM (sandboxed) and native (.dll/.so/.dylib or a .kpl
+            // archive wrapping one) plugins. Everything else is ignored.
+            let is_plugin = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "wasm" | "dll" | "so" | "dylib" | "kpl"
+                    )
+                });
+            if is_plugin {
                 let plugin_name = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -245,7 +418,7 @@ impl PluginManager {
                 let config = configs.get(&plugin_name).cloned().unwrap_or_default();
 
                 if let Err(e) = self.load_plugin(&path, config).await {
-                    log::error!("Failed to load WASM plugin {:?}: {}", path, e);
+                    log::error!("Failed to load plugin {:?}: {}", path, e);
                 }
             }
         }
@@ -253,6 +426,80 @@ impl PluginManager {
         Ok(())
     }
 
+    /// Extracts the platform dynamic library bundled inside a `.kpl` ZIP archive into a temporary directory.
+    ///
+    /// The `.kpl` file is treated as a ZIP archive; every entry is extracted into a temp directory named
+    /// "kojacoord_plugin_<stem>_<pid>". Only each entry's file name is used (to prevent zip-slip); the first
+    /// extracted file with a `.so`, `.dll`, or `.dylib` suffix (case-insensitive) is returned. Other files
+    /// in the archive are copied alongside but are not inspected further.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the archive cannot be opened, extraction fails, or no native library file is found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::path::Path;
+    /// # // Example assumes `example.kpl` exists on disk and contains a native library.
+    /// let lib_path = crate::extract_kpl_library(Path::new("example.kpl")).expect("extract kpl");
+    /// assert!(lib_path.exists());
+    /// ```
+    fn extract_kpl_library(kpl_path: &Path) -> anyhow::Result<std::path::PathBuf> {
+        let file = std::fs::File::open(kpl_path)?;
+        let mut archive = zip::ZipArchive::new(file)?;
+
+        let extract_dir = std::env::temp_dir().join(format!(
+            "kojacoord_plugin_{}_{}",
+            kpl_path.file_stem().unwrap_or_default().to_string_lossy(),
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&extract_dir)?;
+
+        let mut lib_path = None;
+        for i in 0..archive.len() {
+            let mut zfile = archive.by_index(i)?;
+            // Guard against zip-slip: only use the file name, never any path
+            // components the archive might carry.
+            let name = match zfile
+                .enclosed_name()
+                .and_then(|p| p.file_name().map(|f| f.to_owned()))
+            {
+                Some(n) => n,
+                None => continue,
+            };
+            let out_path = extract_dir.join(&name);
+            let mut out = std::fs::File::create(&out_path)?;
+            std::io::copy(&mut zfile, &mut out)?;
+
+            let lname = name.to_string_lossy().to_ascii_lowercase();
+            if lname.ends_with(".so") || lname.ends_with(".dll") || lname.ends_with(".dylib") {
+                lib_path = Some(out_path);
+            }
+        }
+
+        lib_path.ok_or_else(|| anyhow::anyhow!("No native library found in .kpl archive"))
+    }
+
+    /// Unloads a loaded plugin, runs its teardown lifecycle, and removes its runtime state.
+    ///
+    /// Runs the plugin's `on_disable` and `on_unload` lifecycle hooks, drops the in-memory plugin
+    /// instance to release vtable-backed native resources, asks the native loader to unload any
+    /// associated native library, removes the plugin's stored `PluginContext`, and clears all
+    /// registered packet hooks.
+    ///
+    /// Returns
+    ///
+    /// `Ok(metadata)` containing the plugin's metadata if the plugin was found and unloaded,
+    /// `Err` if no plugin with the given name is loaded.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let mut manager = PluginManager::default();
+    /// // unloading a non-existent plugin returns an error
+    /// assert!(manager.unload_plugin("no_such_plugin").is_err());
+    /// ```
     pub fn unload_plugin(&mut self, name: &str) -> anyhow::Result<PluginMetadata> {
         if let Some((plugin, metadata)) = self.plugins.remove(name) {
             // Run lifecycle teardown before dropping the instance.
@@ -266,6 +513,14 @@ impl PluginManager {
                 }
             }
 
+            // Drop the plugin instance (and its `Box<dyn Plugin>`) BEFORE
+            // unmapping the native library that backs its vtable. `plugin` is
+            // the only strong ref — `broadcast_event`/`process_packet` borrow
+            // the map rather than cloning the Arc — so this drop frees the Box.
+            drop(plugin);
+            // No-op for WASM plugins (not registered in the native loader).
+            self.native_loader.unload(name);
+
             self.plugin_configs.remove(name);
 
             self.packet_hooks
@@ -273,7 +528,7 @@ impl PluginManager {
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
 
-            log::info!("Unloaded WASM plugin: {}", name);
+            log::info!("Unloaded plugin: {}", name);
             return Ok(metadata);
         }
         Err(anyhow::anyhow!("Plugin not found: {}", name))

@@ -1810,6 +1810,29 @@ impl ClientConnection {
         }
     }
 
+    /// Parses the client's Encryption Response packet from the current stream and returns the
+    /// extracted shared secret and verify token bytes.
+    ///
+    /// The returned tuple is `(shared_secret, verify_token)`. For modern protocols this is the
+    /// raw shared-secret bytes followed by the verify-token bytes. For Java protocol versions
+    /// 759–760 (1.19 / 1.19.1 / 1.19.2) the client may send a signed form (salt + signature)
+    /// instead of a verify token; in that case the signature is consumed and an empty verify
+    /// token (`Vec::new()`) is returned so the caller can proceed using the signed flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ConnectionError::Protocol(ProtocolError::UnexpectedEof)` when the packet is
+    /// truncated or otherwise does not contain the expected number of bytes; other protocol
+    /// decoding errors are propagated as appropriate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Pseudocode example: `conn` is a connected ClientConnection in an async context.
+    /// // let mut conn: ClientConnection = ...;
+    /// // let (shared_secret, verify_token) = conn.recv_encryption_response().await?;
+    /// // assert!(!shared_secret.is_empty());
+    /// ```
     async fn recv_encryption_response(&mut self) -> Result<(Vec<u8>, Vec<u8>), ConnectionError> {
         use bytes::Buf;
         let mut bytes =
@@ -1839,9 +1862,53 @@ impl ClientConnection {
         } else {
             let ss_len = VarInt::decode(&mut bytes)?.0 as usize;
             let ss: Vec<u8> = bytes.split_to(ss_len).to_vec();
-            let vt_len = VarInt::decode(&mut bytes)?.0 as usize;
-            let vt: Vec<u8> = bytes.split_to(vt_len).to_vec();
-            Ok((ss, vt))
+
+            // 1.19 / 1.19.1 / 1.19.2 (proto 759-760) inserted a
+            // `Has Verify Token` boolean after the shared secret:
+            //   * true  → Verify Token  (VarInt-prefixed bytes) — client
+            //             with no profile key, classic encrypted nonce.
+            //   * false → Salt (i64) + Signature (VarInt-prefixed bytes)
+            //             — client with a Mojang profile key SIGNS the
+            //             nonce instead of encrypting it.
+            // 1.19.3+ (proto 761+) reverted to the plain
+            // `shared_secret + verify_token` shape (chat signing moved
+            // out of login). Reading the plain shape on a 759/760 signed
+            // response consumes the boolean (0x00) as the verify-token
+            // length → empty token → "Authentication failed". Verified
+            // against ViaVersion `Protocol1_18_2To1_19` ENCRYPTION_KEY
+            // handler + minecraft.wiki §Encryption_Response.
+            if (759..=760).contains(&self.protocol_version) {
+                if bytes.remaining() < 1 {
+                    return Err(ConnectionError::Protocol(
+                        kojacoord_protocol::ProtocolError::UnexpectedEof,
+                    ));
+                }
+                let has_verify_token = bytes.get_u8() != 0;
+                if has_verify_token {
+                    let vt_len = VarInt::decode(&mut bytes)?.0 as usize;
+                    let vt: Vec<u8> = bytes.split_to(vt_len).to_vec();
+                    Ok((ss, vt))
+                } else {
+                    // Signed form: salt + signature. We don't re-verify
+                    // the profile signature; return an empty verify token
+                    // so the auth pipeline skips the token comparison and
+                    // relies on the hasJoined server-hash for session
+                    // integrity.
+                    if bytes.remaining() < 8 {
+                        return Err(ConnectionError::Protocol(
+                            kojacoord_protocol::ProtocolError::UnexpectedEof,
+                        ));
+                    }
+                    let _salt = bytes.get_i64();
+                    let sig_len = VarInt::decode(&mut bytes)?.0 as usize;
+                    let _sig: Vec<u8> = bytes.split_to(sig_len).to_vec();
+                    Ok((ss, Vec::new()))
+                }
+            } else {
+                let vt_len = VarInt::decode(&mut bytes)?.0 as usize;
+                let vt: Vec<u8> = bytes.split_to(vt_len).to_vec();
+                Ok((ss, vt))
+            }
         }
     }
 

@@ -27,6 +27,8 @@ log = "0.4"
 bytes = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
+# .kpl plugin archives are zip files wrapping a native dynamic library.
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 wasmtime = { version = "15", features = ["component-model"] }
 wasmtime-wasi = "15"
 

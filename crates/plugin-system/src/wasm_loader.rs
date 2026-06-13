@@ -734,6 +734,28 @@ mod tests {
         assert!(loader.is_ok());
     }
 
+    /// Asserts that loading bytes without a valid WASM magic header is rejected.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// let loader = WasmLoader::new().unwrap();
+    /// let ctx = PluginContext {
+    ///     plugin_id: "test".to_string(),
+    ///     version: "1.0.0".to_string(),
+    ///     config: HashMap::new(),
+    ///     command_tx: None,
+    ///     runtime_handle: None,
+    /// };
+    /// let rt = tokio::runtime::Runtime::new().unwrap();
+    /// rt.block_on(async {
+    ///     let res = loader
+    ///         .load_plugin("test".to_string(), "1.0.0".to_string(), vec![1, 2, 3], &ctx)
+    ///         .await;
+    ///     assert!(res.is_err());
+    /// });
+    /// ```
     #[tokio::test]
     async fn wasm_plugin_loading_invalid() {
         let loader = WasmLoader::new().unwrap();
@@ -743,6 +765,7 @@ mod tests {
             version: "1.0.0".to_string(),
             config: HashMap::new(),
             command_tx: None,
+            runtime_handle: None,
         };
 
         // Invalid WASM (no magic number)

@@ -46,3 +46,54 @@ This file contains the raw, uncopyrightable vanilla Minecraft 1.16.2 protocol re
 
 Because this data represents functional game states and protocol requirements dictated by the vanilla client, it contains no original creative expression and is free from third-party licensing constraints.
 
+# Attribution: `chat_registry_1_19.nbt`
+
+This file is taken verbatim from ViaVersion, file path:
+
+```
+common/src/main/resources/assets/viaversion/data/chat-registry-1.19.nbt
+```
+
+ViaVersion is distributed under **GPL v3** (see
+<https://www.gnu.org/licenses/gpl-3.0.html>).
+
+## Why we use it
+
+`minecraft:chat_type` is a required registry inside the 1.19 dimension
+codec (proto 759 - 763). The 1.19 client's
+`EntityPacketRewriter1_19.java:177` confirms this:
+
+```java
+// Add necessary chat types
+tag.put("minecraft:chat_type", protocol.getMappingData().chatRegistry());
+```
+
+Without this registry the client's strict `MapCodec` deserialiser
+walks past the codec's TAG_End into the next packet's framing bytes,
+producing the user-visible `length wider than 21-bit` netty
+`CorruptedFrameException`.
+
+We embed ViaVersion's blob verbatim rather than re-implementing the
+registry because the field set, ordering, and `parameters` arrays
+must match Mojang's expected schema exactly — same risk-reduction
+rationale as the 1.16.2 dimension codec above.
+
+# Attribution: `chat_registry_1_19_1.nbt`
+
+Same as above, sourced from
+`common/src/main/resources/assets/viaversion/data/chat-registry-1.19.1.nbt`
+in ViaVersion. The 1.19.1 / 1.19.2 chat registry adds a couple of
+chat types (`minecraft:say_command`, etc.). Reserved for future
+proto-760+ codec routing — not yet wired into
+`build_dimension_codec_for_proto`.
+
+## License compatibility (same analysis applies)
+
+These NBT blobs are binary representations of facts about Mojang's
+game state (which chat types exist, what their parameter lists are).
+They contain no original creative code and arguably fall under
+"mere aggregation" with respect to ViaVersion's GPL v3 surface.
+License-conscious downstream consumers should consult their own
+counsel; replacements can be hand-constructed via the augment helpers
+in `proxy-core/src/protocol/dimension_codec.rs`.
+

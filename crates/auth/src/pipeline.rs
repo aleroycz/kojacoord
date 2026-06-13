@@ -173,6 +173,38 @@ impl AuthPipeline {
         }
     }
 
+    /// Advance the login state machine by handling a single authentication event for the given client IP.
+    ///
+    /// This method processes `AuthEvent`s according to the current `AuthState`, performing the offline
+    /// login flow, initiating encryption, validating encryption responses (including the 1.19
+    /// "signed-nonce" form where the verify-token can be empty), performing session verification
+    /// (hasJoined), and producing the corresponding outbound actions such as `EncryptionRequest`,
+    /// `EnableEncryption`, `SetCompression`, and `LoginSuccess`. On failure it returns an `AuthError`.
+    ///
+    /// # Parameters
+    ///
+    /// - `event`: the incoming authentication event to process (e.g. `LoginStart` or
+    ///   `EncryptionResponse`).
+    /// - `client_ip`: the peer IP address; may be sent to the session server when proxy-prevention is
+    ///   enabled.
+    ///
+    /// # Returns
+    ///
+    /// `Ok((AuthState, Vec<AuthOutbound>))` on success containing the pipeline's new state and any
+    /// outbound messages to send to the client; `Err(AuthError)` on failure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::net::IpAddr;
+    /// # async fn example(mut pipeline: crate::auth::AuthPipeline) -> Result<(), crate::auth::AuthError> {
+    /// use crate::auth::{AuthEvent, AuthPipeline};
+    /// let event = AuthEvent::LoginStart { username: "Player".into(), client_uuid: None };
+    /// let ip: IpAddr = "127.0.0.1".parse().unwrap();
+    /// let (new_state, outbounds) = pipeline.step(event, ip).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     async fn step(
         &mut self,
         event: AuthEvent,
@@ -252,15 +284,34 @@ impl AuthPipeline {
                         .await
                         .map_err(|_| AuthError::EncryptionSetupFailed("task panic".into()))??;
 
-                let rsa_key_2 = self.rsa_key.clone();
-                let vt_enc = verify_token_enc.clone();
-                let decrypted_token =
-                    tokio::task::spawn_blocking(move || rsa_decrypt(&rsa_key_2, &vt_enc))
-                        .await
-                        .map_err(|_| AuthError::EncryptionSetupFailed("task panic".into()))??;
+                // 1.19 / 1.19.1 / 1.19.2 (proto 759-760) clients with a
+                // Mojang profile key send the SIGNED form of the
+                // Encryption Response: instead of an RSA-encrypted verify
+                // token they send `salt + signature`, which the
+                // connection layer cannot turn into an encrypted token —
+                // it surfaces here as an empty `verify_token_enc`. The
+                // nonce in that mode is bound by the profile signature
+                // (not re-verified here); session integrity still comes
+                // from the `hasJoined` server-hash check below, so skip
+                // the token comparison rather than fail auth. Non-empty
+                // tokens (all other versions, and 1.19 clients without a
+                // profile key) are validated as before.
+                if verify_token_enc.is_empty() {
+                    tracing::debug!(
+                        "encryption response used 1.19 signed-nonce form; \
+                         skipping verify-token comparison (session validated via hasJoined)"
+                    );
+                } else {
+                    let rsa_key_2 = self.rsa_key.clone();
+                    let vt_enc = verify_token_enc.clone();
+                    let decrypted_token =
+                        tokio::task::spawn_blocking(move || rsa_decrypt(&rsa_key_2, &vt_enc))
+                            .await
+                            .map_err(|_| AuthError::EncryptionSetupFailed("task panic".into()))??;
 
-                if decrypted_token.as_slice() != stored_token.as_slice() {
-                    return Err(AuthError::VerifyTokenMismatch);
+                    if decrypted_token.as_slice() != stored_token.as_slice() {
+                        return Err(AuthError::VerifyTokenMismatch);
+                    }
                 }
 
                 let ss_arr: [u8; 16] = shared_secret.as_slice().try_into().map_err(|_| {

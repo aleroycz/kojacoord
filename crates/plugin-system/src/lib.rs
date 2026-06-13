@@ -16,14 +16,16 @@
 pub mod api;
 pub mod integrity;
 pub mod manager;
+pub mod native_loader;
 pub mod sandbox;
 pub mod wasm_loader;
 
 pub use api::{
     PacketData, PacketDirection, PacketEvent, PacketFilter, PacketHookFn, PacketHookResult, Plugin,
-    PluginCommand, PluginContext, PluginEvent, PluginMetadata, PluginResponse,
+    PluginCommand, PluginContext, PluginEvent, PluginMetadata, PluginPermission, PluginResponse,
 };
 pub use integrity::PluginVerifier;
 pub use manager::PluginManager;
+pub use native_loader::PluginLoader;
 pub use sandbox::{apply_sandbox, validate_plugin_permissions, SandboxConfig};
 pub use wasm_loader::{WasmLoader, WasmPluginAdapter, WasmPluginInstance};

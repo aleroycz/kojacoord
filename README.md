@@ -148,24 +148,42 @@ vanilla client of that version: client reaches the limbo flat-world spawn,
 the chat / sound / abilities / keepalive loop holds, and the proxy can
 gracefully kick with the configured shutdown reason):
 
-| Version family   | Protocol range | Status                              |
-| ---------------- | -------------- | ----------------------------------- |
-| 1.6.x            | 73 - 78        | Tested                              |
-| 1.7.x            | 4 - 5          | Tested                              |
-| 1.8.x            | 47             | Tested                              |
-| 1.9.x            | 107 - 110      | WIP                                 |
-| 1.10.x           | 210 - 210      | WIP                                 |
-| 1.11.x           | 315 - 316      | WIP                                 |
-| 1.12.x           | 335 - 340      | Tested                              |
-| 1.13.x           | 393 - 404      | Tested                              |
-| 1.14.x           | 477 - 498      | Tested                              |
-| 1.15.x           | 573 - 578      | Tested                              |
-| 1.16.x           | 735 - 754      | Tested                              |
-| 1.17.x           | 755 - 756      | Tested                              |
-| 1.18.x           | 757 - 758      | Tested                              |
-| 1.19.x           | 759 - 762      | WIP                                 |
-| 1.20.x           | 763 - 766      | WIP                                 |
-| 1.21.x           | 767+           | WIP                                 |
+Every client version is mapped onto a **canonical bucket** — the concrete
+typed-packet implementation that drives the limbo and protocol conversion
+for that whole protocol family. Several patch releases share one protocol
+number (e.g. 1.19.1 and 1.19.2 are both 760), so they collapse onto the
+same row.
+
+| Version family | Canonical bucket | Status |
+| -------------- | ---------------- | ------ |
+| 1.6.x          | `V1_6_4`  | Tested |
+| 1.7.x          | `V1_7_10` | Tested |
+| 1.8.x          | `V1_8`    | Tested |
+| 1.9.x – 1.12.x | `V1_12_2` | 1.12 Tested · 1.9–1.11 WIP |
+| 1.13.x – 1.16.x| `V1_16_5` | Tested |
+| 1.17.x – 1.19.x| `V1_19_4` | Tested |
+| 1.20.x         | `V1_20_4` | 1.20/1.20.1 Tested · 1.20.2+ WIP |
+| 1.21.x         | `V1_21`   | WIP |
+
+#### Sub-versions per family (1.18 → 1.21)
+
+Each patch release and the exact protocol number it negotiates with. A
+`·` groups patch releases that share one protocol number.
+
+| Family | Sub-versions (protocol) | Bucket |
+| ------ | ----------------------- | ------ |
+| **1.18.x** | 1.18 · 1.18.1 (757) · 1.18.2 (758) | `V1_19_4` |
+| **1.19.x** | 1.19 (759) · 1.19.1 · 1.19.2 (760) · 1.19.3 (761) · 1.19.4 (762) | `V1_19_4` |
+| **1.20.x** | 1.20 · 1.20.1 (763) · 1.20.2 (764) · 1.20.3 · 1.20.4 (765) · 1.20.5 · 1.20.6 (766) | `V1_20_4` |
+| **1.21.x** | 1.21 · 1.21.1 (767) · 1.21.2 · 1.21.3 (768) · 1.21.4 (769) · 1.21.5 (770) · 1.21.6 (771) · 1.21.7 · 1.21.8 (772) · 1.21.9 (773) · 1.21.10 · 1.21.11 (774) | `V1_21` |
+
+> **Limbo support by protocol era.** 1.16–1.20.1 (≤ 763) embed the
+> registry codec directly in JoinGame. 1.20.2+ (764+) moved registries to
+> the configuration phase: 1.20.2–1.20.4 fall back to the client's
+> built-in registries, while 1.20.5+/1.21 (766+) are sent explicit
+> `RegistryData` captured from `minecraft-data`. Void-chunk + Set-Center-
+> Chunk (to clear the "Loading terrain" screen) currently covers the
+> `V1_19_4` bucket (1.17–1.19.4); `V1_20`/`V1_21` are being extended.
 
 Protocol conversion happens automatically when clients connect to backend
 servers running different versions—no manual configuration needed. The

@@ -52,6 +52,11 @@ pub struct PluginContext {
     /// Channel for sending privileged commands to the proxy. Set by the proxy
     /// when the plugin is loaded.
     pub command_tx: Option<tokio::sync::mpsc::UnboundedSender<PluginCommand>>,
+    /// Tokio runtime handle so native plugins can spawn tasks even when loaded
+    /// across a dynamic-library boundary where thread-local storage (and thus
+    /// the ambient runtime) is not shared. `None` for WASM plugins, which run
+    /// inside the host's wasmtime store and never spawn their own tasks.
+    pub runtime_handle: Option<tokio::runtime::Handle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

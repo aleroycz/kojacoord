@@ -62,18 +62,21 @@ pub fn determine_injection_mode(client_protocol: u32, backend_protocol: u32) -> 
     }
 }
 
-/// Build a dimension codec NBT for the given protocol.
+/// Selects and returns an authoritative dimension codec NBT blob appropriate for the given protocol version.
 ///
-/// Per BungeeCord `protocol/Login.java`, the codec field exists from
-/// proto 735 (1.16) onward and was removed when the Configuration
-/// phase split out the registry data at proto 764 (1.20.2).
+/// Prefers precomputed per-protocol binary NBT blobs when available; otherwise delegates to the library builders and maps any builder error to a `String` error. The returned `Vec<u8>` is a single self-framing binary NBT blob representing the JoinGame codec registries for that protocol.
 ///
-/// Strategy: prefer the byte-for-byte PrismarineJS codec for this
-/// proto if `crates/protocol/data/dimension_codec_<proto>.nbt.bin`
-/// was populated by `gen_dimension_codec`. Otherwise fall back to the
-/// synthesised minimal codec which is enough to pass the client's
-/// "did the server send a codec?" check but doesn't enumerate the
-/// nether/end dimensions or the full biome registry.
+/// # Errors
+///
+/// Returns `Err(String)` when a delegated codec builder fails.
+///
+/// # Examples
+///
+/// ```
+/// let codec = build_dimension_codec_for_proto(759).expect("should build 1.19 codec");
+/// // codec contains the full binary NBT codec for proto 759
+/// assert!(!codec.is_empty());
+/// ```
 pub fn build_dimension_codec_for_proto(proto: u32) -> Result<Vec<u8>, String> {
     // Per-era codec schema. Mojang restructured the dimension_codec
     // TWICE inside the 1.16-1.20 window:
@@ -107,11 +110,49 @@ pub fn build_dimension_codec_for_proto(proto: u32) -> Result<Vec<u8>, String> {
         // ViaVersion uses (they've kept these protos working in
         // production for years against vanilla and modded clients).
         751..=754 => Ok(VIAVERSION_DIM_REGISTRY_1_16_2.to_vec()),
-        // 1.17 / 1.17.1 / 1.18 / 1.18.2: same blob, then augment each
-        // element with `min_y` and `height` per ViaVersion's
-        // `EntityPacketRewriter1_17::addNewDimensionData`. Same code
-        // path the real 1.17+ ViaVersion deployment runs.
-        755..=758 => augment_1_16_2_codec_for_1_17_plus(),
+        // 1.17 / 1.17.1 / 1.18 / 1.18.2: authoritative minecraft-data
+        // blobs (same approach as the 1.19 family below). The previous
+        // "augment the 1.16.2 blob with min_y/height" path worked for
+        // 1.17 (which still carries biome `depth`/`scale`/`category`)
+        // but NOT 1.18/1.18.2: Mojang removed biome `depth`/`scale` in
+        // 1.18, so the 1.16.2-derived biomes made the 1.18.x client
+        // reject the registry and dump it (same SNBT-on-screen symptom
+        // as the 1.19 regression). minecraft-data confirms: 1.17 biomes
+        // keep depth/scale/category, 1.18/1.18.2 biomes drop depth/scale
+        // (61-entry set starting `minecraft:the_void`). 1.17.1 has no
+        // distinct minecraft-data entry — the 1.17 blob is wire-correct
+        // for it.
+        755 | 756 => Ok(DIM_CODEC_1_17.to_vec()),
+        757 => Ok(DIM_CODEC_1_18.to_vec()),
+        758 => Ok(DIM_CODEC_1_18_2.to_vec()),
+        // 1.19 family (proto 759-763): ship the authoritative dimension
+        // codec captured from a real vanilla server, via PrismarineJS
+        // `minecraft-data` `pc/<ver>/loginPacket.json` → binary NBT.
+        //
+        // The previous approach (augment the 1.16.2 ViaVersion blob with
+        // min_y/height/monster_spawn + a chat_type registry) produced a
+        // STRUCTURALLY valid codec that the 1.19 client's strict registry
+        // codecs still rejected, dumping the registry SNBT in a "received
+        // invalid data" disconnect. Three independent reasons, all fixed
+        // by using the real blob:
+        //   * biome elements carried `depth`/`scale` (gone in 1.18) and
+        //     `category` (gone in 1.19);
+        //   * the biome *set* was the obsolete 1.16 list (no `the_void`,
+        //     etc.) rather than the real 1.19 63-biome registry;
+        //   * dimension `infiniburn` was `minecraft:infiniburn_overworld`
+        //     but 1.18+ wants the block-tag form `#minecraft:...`.
+        // The real blobs already include `minecraft:chat_type`,
+        // `minecraft:dimension_type`, and `minecraft:worldgen/biome`
+        // with the correct per-version shapes (1.19.4 switched biome
+        // `precipitation` string → `has_precipitation` bool).
+        759 => Ok(DIM_CODEC_1_19.to_vec()),
+        760 | 761 => Ok(DIM_CODEC_1_19_2.to_vec()),
+        762 => Ok(DIM_CODEC_1_19_4.to_vec()),
+        // 1.20 / 1.20.1 (proto 763): adds the trim_pattern/trim_material
+        // /damage_type registries on top of the 1.19.4 set. Still sent as
+        // a single JoinGame codec (1.20.2+ moved registries to the
+        // configuration phase — handled elsewhere).
+        763 => Ok(DIM_CODEC_1_20.to_vec()),
         p if p >= 764 => {
             kojacoord_protocol::dimension_codec_nbt_1_20_4().map_err(|e| e.to_string())
         },
@@ -119,61 +160,94 @@ pub fn build_dimension_codec_for_proto(proto: u32) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Extracts the inline `dimension` element for `dim_key` from the proto's
+/// dimension registry NBT and returns it as a network-shaped NBT blob with
+/// an empty root name (the wire form used as the inline `dimension` in
+/// JoinGame/Respawn packets).
+///
+/// Returns an error if the registry NBT cannot be decoded, required fields are
+/// missing or have the wrong NBT tags, the named dimension is not present, or
+/// encoding the resulting inline element fails.
+///
+/// # Examples
+///
+/// ```
+/// let inline = inline_dimension_nbt_for_proto("minecraft:overworld", 754)?;
+/// assert!(!inline.is_empty());
+/// # Ok::<(), String>(())
+/// ```
+pub fn inline_dimension_nbt_for_proto(dim_key: &str, proto: u32) -> Result<Vec<u8>, String> {
+    use kojacoord_protocol::codec::{Decode, Encode};
+    use kojacoord_protocol::types::nbt::{Nbt, NbtTag};
+
+    let codec = build_dimension_codec_for_proto(proto)?;
+    let mut src = bytes::Bytes::copy_from_slice(&codec);
+    let nbt = Nbt::decode(&mut src).map_err(|e| e.to_string())?;
+
+    let NbtTag::Compound(dim_reg) = nbt
+        .root
+        .get("minecraft:dimension_type")
+        .ok_or("codec missing minecraft:dimension_type")?
+    else {
+        return Err("dimension_type is not a compound".into());
+    };
+    let NbtTag::List(entries) = dim_reg.get("value").ok_or("dimension_type missing value")? else {
+        return Err("dimension_type value is not a list".into());
+    };
+    let element = entries
+        .iter()
+        .find_map(|e| {
+            let NbtTag::Compound(m) = e else { return None };
+            match m.get("name") {
+                Some(NbtTag::String(n)) if n == dim_key => m.get("element"),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| format!("dimension {dim_key} not found in proto {proto} registry"))?;
+
+    let NbtTag::Compound(element_map) = element else {
+        return Err("dimension element is not a compound".into());
+    };
+    let inline = Nbt {
+        name: String::new(),
+        root: element_map.clone(),
+    };
+    let mut buf = bytes::BytesMut::new();
+    inline.encode(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf.to_vec())
+}
+
 /// ViaVersion's `dimension-registry-1.16.2.nbt` (GPL v3, see
 /// `crates/protocol/data/dimension_codec_1_16_2.LICENSE.md`).
 static VIAVERSION_DIM_REGISTRY_1_16_2: &[u8] =
     include_bytes!("../../../../crates/protocol/data/dimension_codec_1_16_2.nbt");
 
-/// Decode ViaVersion's 1.16.2 codec, walk to every dimension entry's
-/// `element` compound, insert `min_y` and `height` (both required
-/// from proto 755 / 1.17 onward), then re-encode. Mirrors
-/// `EntityPacketRewriter1_17::addNewDimensionData` in ViaVersion.
-fn augment_1_16_2_codec_for_1_17_plus() -> Result<Vec<u8>, String> {
-    use kojacoord_protocol::codec::{Decode, Encode};
-    use kojacoord_protocol::types::nbt::{Nbt, NbtTag};
+/// Authoritative 1.19 / 1.19.2 / 1.19.4 dimension codecs, captured from
+/// PrismarineJS `minecraft-data` `pc/<ver>/loginPacket.json` and
+/// converted to binary (big-endian, named-root) NBT. Each contains the
+/// full `minecraft:chat_type` + `minecraft:dimension_type` +
+/// `minecraft:worldgen/biome` registries exactly as a vanilla server of
+/// that version sends them in JoinGame. 1.19/1.19.2 use the
+/// `precipitation` string biome shape; 1.19.4 uses `has_precipitation`.
+static DIM_CODEC_1_17: &[u8] =
+    include_bytes!("../../../../crates/protocol/data/dimension_codec_1_17.nbt");
+static DIM_CODEC_1_18: &[u8] =
+    include_bytes!("../../../../crates/protocol/data/dimension_codec_1_18.nbt");
+static DIM_CODEC_1_18_2: &[u8] =
+    include_bytes!("../../../../crates/protocol/data/dimension_codec_1_18_2.nbt");
+static DIM_CODEC_1_19: &[u8] =
+    include_bytes!("../../../../crates/protocol/data/dimension_codec_1_19.nbt");
+static DIM_CODEC_1_19_2: &[u8] =
+    include_bytes!("../../../../crates/protocol/data/dimension_codec_1_19_2.nbt");
+static DIM_CODEC_1_19_4: &[u8] =
+    include_bytes!("../../../../crates/protocol/data/dimension_codec_1_19_4.nbt");
+static DIM_CODEC_1_20: &[u8] =
+    include_bytes!("../../../../crates/protocol/data/dimension_codec_1_20.nbt");
 
-    let mut src = bytes::Bytes::copy_from_slice(VIAVERSION_DIM_REGISTRY_1_16_2);
-    let mut nbt = Nbt::decode(&mut src).map_err(|e| e.to_string())?;
-
-    // root → "minecraft:dimension_type" Compound → "value" List<Compound>
-    let dim_registry = nbt
-        .root
-        .get_mut("minecraft:dimension_type")
-        .ok_or_else(|| "missing minecraft:dimension_type registry".to_string())?;
-    let NbtTag::Compound(reg_map) = dim_registry else {
-        return Err("minecraft:dimension_type is not a compound".into());
-    };
-    let value_list = reg_map
-        .get_mut("value")
-        .ok_or_else(|| "missing value list in dimension_type".to_string())?;
-    let NbtTag::List(entries) = value_list else {
-        return Err("value is not a list".into());
-    };
-
-    for entry in entries.iter_mut() {
-        let NbtTag::Compound(entry_map) = entry else {
-            continue;
-        };
-        let Some(element) = entry_map.get_mut("element") else {
-            continue;
-        };
-        let NbtTag::Compound(element_map) = element else {
-            continue;
-        };
-        element_map.insert("min_y".into(), NbtTag::Int(0));
-        element_map.insert("height".into(), NbtTag::Int(256));
-    }
-
-    let mut buf = bytes::BytesMut::new();
-    nbt.encode(&mut buf).map_err(|e| e.to_string())?;
-    Ok(buf.to_vec())
-}
-
-// build_codec_1_16_2_through_1_16_5 + build_codec_1_17_through_1_18_2
-// + build_modern_codec replaced by `VIAVERSION_DIM_REGISTRY_1_16_2`
-// embedding and `augment_1_16_2_codec_for_1_17_plus`. Kept the
-// 1.16.0/1.16.1 hand-builder below since ViaVersion constructs that
-// one in Java code (no precomputed NBT to embed).
+// 1.17 - 1.20 codecs are now the authoritative minecraft-data blobs
+// (`DIM_CODEC_1_17` … `DIM_CODEC_1_20`); the old
+// `augment_1_16_2_codec_for_1_17_plus` synthesiser was removed because
+// it carried the 1.16 biome set (wrong depth/scale for 1.18+).
 
 // Kept the 1.16.0/1.16.1 hand-builder below — ViaVersion constructs
 // it in Java code (no precomputed NBT for that era to embed).
@@ -784,6 +858,260 @@ mod ship_check {
         assert!(
             out.windows(height.len()).any(|w| w == height),
             "1.17 inline dim MUST contain height"
+        );
+    }
+
+    /// 1.19 codec MUST contain `minecraft:chat_type` registry,
+    /// `monster_spawn_*` element fields, AND the 1.17 `min_y`/`height`.
+    #[test]
+    fn proto_759_codec_contains_chat_type_and_monster_spawn() {
+        let out = build_dimension_codec_for_proto(759).expect("must build");
+        let chat_type: &[u8] = &[
+            0x00, 0x13, b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':', b'c', b'h',
+            b'a', b't', b'_', b't', b'y', b'p', b'e',
+        ];
+        let monster_spawn_light: &[u8] = &[
+            0x00, 0x19, b'm', b'o', b'n', b's', b't', b'e', b'r', b'_', b's', b'p', b'a', b'w',
+            b'n', b'_', b'l', b'i', b'g', b'h', b't', b'_', b'l', b'e', b'v', b'e', b'l',
+        ];
+        let min_y: &[u8] = &[0x00, 0x05, b'm', b'i', b'n', b'_', b'y'];
+        assert!(
+            out.windows(chat_type.len()).any(|w| w == chat_type),
+            "1.19 codec MUST contain minecraft:chat_type registry"
+        );
+        assert!(
+            out.windows(monster_spawn_light.len())
+                .any(|w| w == monster_spawn_light),
+            "1.19 codec MUST contain monster_spawn_light_level on dim elements"
+        );
+        assert!(
+            out.windows(min_y.len()).any(|w| w == min_y),
+            "1.19 codec MUST contain min_y (1.17 carry-over)"
+        );
+    }
+
+    /// Validates that the embedded 1.19 dimension codec is authoritative and wire-compatible.
+    ///
+    /// Ensures the 1.19 codec's biome registry omits the obsolete `depth`/`scale`/`category` fields,
+    /// includes `minecraft:the_void`, preserves `effects`, that dimension `infiniburn` values use
+    /// the `#`-prefixed block-tag form, and that `minecraft:chat_type` is present.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // This test performs deep validation; calling the codec builder must succeed.
+    /// let _ = build_dimension_codec_for_proto(759).expect("build 759");
+    /// ```
+    #[test]
+    fn proto_759_codec_is_authoritative_1_19() {
+        use kojacoord_protocol::codec::Decode;
+        use kojacoord_protocol::types::nbt::{Nbt, NbtTag};
+
+        let codec = build_dimension_codec_for_proto(759).expect("build 759");
+        let mut src = bytes::Bytes::copy_from_slice(&codec);
+        let nbt = Nbt::decode(&mut src).expect("decode");
+        assert_eq!(src.len(), 0, "codec must be exactly one NBT (no trailing)");
+
+        // --- biomes ---
+        let NbtTag::Compound(biome_reg) = nbt
+            .root
+            .get("minecraft:worldgen/biome")
+            .expect("biome registry present")
+        else {
+            panic!("biome registry not a compound");
+        };
+        let NbtTag::List(biomes) = biome_reg.get("value").expect("value list") else {
+            panic!("biome value not a list");
+        };
+        assert!(biomes.len() >= 60, "real 1.19 biome set is ~63 entries");
+        let mut saw_the_void = false;
+        for entry in biomes {
+            let NbtTag::Compound(entry_map) = entry else {
+                continue;
+            };
+            if let Some(NbtTag::String(name)) = entry_map.get("name") {
+                if name == "minecraft:the_void" {
+                    saw_the_void = true;
+                }
+            }
+            let Some(NbtTag::Compound(element)) = entry_map.get("element") else {
+                continue;
+            };
+            for banned in ["depth", "scale", "category"] {
+                assert!(
+                    !element.contains_key(banned),
+                    "1.19 biome must not contain `{banned}`"
+                );
+            }
+            assert!(element.contains_key("effects"), "biome must keep effects");
+        }
+        assert!(
+            saw_the_void,
+            "real 1.19 registry must contain minecraft:the_void"
+        );
+
+        // --- dimension infiniburn must be the #tag form ---
+        let NbtTag::Compound(dim_reg) = nbt
+            .root
+            .get("minecraft:dimension_type")
+            .expect("dimension_type present")
+        else {
+            panic!("dimension_type not a compound");
+        };
+        let NbtTag::List(dims) = dim_reg.get("value").expect("dim value list") else {
+            panic!("dim value not a list");
+        };
+        for entry in dims {
+            let NbtTag::Compound(entry_map) = entry else {
+                continue;
+            };
+            let Some(NbtTag::Compound(element)) = entry_map.get("element") else {
+                continue;
+            };
+            if let Some(NbtTag::String(inf)) = element.get("infiniburn") {
+                assert!(
+                    inf.starts_with('#'),
+                    "1.19 dimension infiniburn must be a #block-tag, got `{inf}`"
+                );
+            }
+        }
+
+        // --- chat_type registry present (1.19 requires it) ---
+        assert!(
+            nbt.root.contains_key("minecraft:chat_type"),
+            "1.19 codec must include minecraft:chat_type"
+        );
+    }
+
+    /// Verifies that the inline per-dimension NBT extracted for protos 755, 757, and 758 matches the registry's expectations.
+    ///
+    /// Asserts that the extracted inline NBT decodes cleanly with no trailing bytes, contains the `min_y` and `height` fields (required for 1.17+), and that the `infiniburn` string uses the `#`-block-tag form only for proto 758 (1.18.2).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let bytes = inline_dimension_nbt_for_proto("minecraft:overworld", 758).unwrap();
+    /// let mut src = bytes::Bytes::copy_from_slice(&bytes);
+    /// let nbt = kojacoord_protocol::codec::Decode::decode(&mut src).unwrap();
+    /// assert!(src.is_empty());
+    /// if let kojacoord_protocol::types::nbt::NbtTag::String(inf) = nbt.root.get("infiniburn").unwrap() {
+    ///     assert!(inf.starts_with('#'));
+    /// }
+    /// assert!(nbt.root.contains_key("min_y") && nbt.root.contains_key("height"));
+    /// ```
+    #[test]
+    fn inline_dimension_matches_registry_for_1_17_1_18() {
+        use kojacoord_protocol::codec::Decode;
+        use kojacoord_protocol::types::nbt::{Nbt, NbtTag};
+
+        // The `#`-block-tag infiniburn form is 1.18.2-only (proto 758);
+        // 1.17 (755) and 1.18.0 (757) still use the bare identifier.
+        for (proto, want_tag_infiniburn) in [(755u32, false), (757, false), (758, true)] {
+            let bytes = inline_dimension_nbt_for_proto("minecraft:overworld", proto)
+                .unwrap_or_else(|e| panic!("proto {proto}: {e}"));
+            let mut src = bytes::Bytes::copy_from_slice(&bytes);
+            let nbt = Nbt::decode(&mut src).expect("inline dim decodes");
+            assert_eq!(src.len(), 0, "proto {proto} inline dim has trailing bytes");
+            let Some(NbtTag::String(inf)) = nbt.root.get("infiniburn") else {
+                panic!("proto {proto} inline dim missing string infiniburn");
+            };
+            assert_eq!(
+                inf.starts_with('#'),
+                want_tag_infiniburn,
+                "proto {proto} infiniburn `#`-tag expectation mismatch (got `{inf}`)"
+            );
+            assert!(
+                nbt.root.contains_key("min_y") && nbt.root.contains_key("height"),
+                "proto {proto} inline dim must have min_y/height (1.17+)"
+            );
+        }
+    }
+
+    /// Every wired JoinGame-codec proto (1.16.2 → 1.20.1) must decode
+    /// to exactly one self-framing NBT with no trailing bytes, and
+    /// contain the three core registries. Guards all embedded
+    /// minecraft-data blobs at once against truncation / conversion bugs.
+    #[test]
+    fn all_wired_codecs_decode_cleanly() {
+        use kojacoord_protocol::codec::Decode;
+        use kojacoord_protocol::types::nbt::{Nbt, NbtTag};
+
+        for proto in [751u32, 754, 755, 756, 757, 758, 759, 760, 761, 762, 763] {
+            let codec = build_dimension_codec_for_proto(proto)
+                .unwrap_or_else(|e| panic!("proto {proto} build failed: {e}"));
+            let mut src = bytes::Bytes::copy_from_slice(&codec);
+            let nbt = Nbt::decode(&mut src)
+                .unwrap_or_else(|e| panic!("proto {proto} NBT decode failed: {e}"));
+            assert_eq!(src.len(), 0, "proto {proto} codec has trailing bytes");
+
+            for reg in ["minecraft:dimension_type", "minecraft:worldgen/biome"] {
+                assert!(nbt.root.contains_key(reg), "proto {proto} missing {reg}");
+            }
+            // chat_type registry only exists from 1.19 (proto 759).
+            if proto >= 759 {
+                assert!(
+                    nbt.root.contains_key("minecraft:chat_type"),
+                    "proto {proto} (1.19+) missing minecraft:chat_type"
+                );
+            }
+
+            // biome depth/scale are gone from 1.18 (proto 757); category
+            // is gone from 1.19 (proto 759). Verify the strip-by-version.
+            let NbtTag::Compound(biome_reg) = nbt.root.get("minecraft:worldgen/biome").unwrap()
+            else {
+                panic!("proto {proto} biome registry not compound");
+            };
+            let NbtTag::List(biomes) = biome_reg.get("value").unwrap() else {
+                panic!("proto {proto} biome value not list");
+            };
+            for entry in biomes {
+                let NbtTag::Compound(em) = entry else {
+                    continue;
+                };
+                let Some(NbtTag::Compound(el)) = em.get("element") else {
+                    continue;
+                };
+                if proto >= 757 {
+                    assert!(
+                        !el.contains_key("depth") && !el.contains_key("scale"),
+                        "proto {proto} biome must not have depth/scale (removed in 1.18)"
+                    );
+                }
+                if proto >= 759 {
+                    assert!(
+                        !el.contains_key("category"),
+                        "proto {proto} biome must not have category (removed in 1.19)"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 1.19 inline dim MUST contain `monster_spawn_light_level`.
+    #[test]
+    fn inline_dim_759_contains_monster_spawn_light_level() {
+        let out = dimension_type_nbt_for_proto("minecraft:overworld", 759).expect("must build");
+        let needle: &[u8] = &[
+            0x00, 0x19, b'm', b'o', b'n', b's', b't', b'e', b'r', b'_', b's', b'p', b'a', b'w',
+            b'n', b'_', b'l', b'i', b'g', b'h', b't', b'_', b'l', b'e', b'v', b'e', b'l',
+        ];
+        assert!(
+            out.windows(needle.len()).any(|w| w == needle),
+            "1.19 inline dim MUST contain monster_spawn_light_level"
+        );
+    }
+
+    /// 1.18.2 inline dim MUST NOT contain `monster_spawn_light_level`.
+    #[test]
+    fn inline_dim_758_no_monster_spawn_light_level() {
+        let out = dimension_type_nbt_for_proto("minecraft:overworld", 758).expect("must build");
+        let needle: &[u8] = &[
+            0x00, 0x19, b'm', b'o', b'n', b's', b't', b'e', b'r', b'_', b's', b'p', b'a', b'w',
+            b'n', b'_', b'l', b'i', b'g', b'h', b't', b'_', b'l', b'e', b'v', b'e', b'l',
+        ];
+        assert!(
+            !out.windows(needle.len()).any(|w| w == needle),
+            "1.18.2 inline dim must NOT contain monster_spawn_light_level (1.19+ only)"
         );
     }
 

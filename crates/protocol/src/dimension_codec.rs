@@ -211,17 +211,28 @@ pub fn dimension_type_nbt_1_20_4(key: &str) -> Result<Vec<u8>, ProtocolError> {
     dimension_type_nbt_with_version(key, DimSchema::V1_20_4)
 }
 
-/// Proto-aware inline dimension NBT.
+/// Selects a dimension-schema based on a protocol version and returns the encoded inline dimension-type NBT for the given registry key.
 ///
-/// Per minecraft.wiki §JoinGame + ViaVersion `EntityPacketRewriter1_17`:
-///   * 751 - 754 (1.16.2 - 1.16.5)  →  13-field element, no `min_y`/`height`
-///   * 755 - 763 (1.17  - 1.19.4)   →  + `min_y`/`height` (1.17 additions)
-///   * 764+      (1.20.2+)          →  + `monster_spawn_light_level`,
-///                                      `monster_spawn_block_light_limit`,
-///                                      `fixed_time` int placeholder
+/// The function maps `proto` to an internal `DimSchema`:
+/// - proto >= 764 => V1_20_4
+/// - 759 ..= 763   => V1_19
+/// - 758           => V1_18_2
+/// - 755 ..= 757   => V1_17
+/// - otherwise     => V1_16_2
+///
+/// The produced NBT matches the field layout expected by the selected schema (e.g., presence or absence of `min_y`/`height`, spawn-light fields, and the 1.20.4 placeholders).
+///
+/// # Examples
+///
+/// ```
+/// let bytes = dimension_type_nbt_for_proto("minecraft:overworld", 758).unwrap();
+/// assert!(bytes.len() > 0);
+/// ```
 pub fn dimension_type_nbt_for_proto(key: &str, proto: u32) -> Result<Vec<u8>, ProtocolError> {
     let schema = match proto {
         p if p >= 764 => DimSchema::V1_20_4,
+        p if p >= 759 => DimSchema::V1_19,
+        p if p >= 758 => DimSchema::V1_18_2,
         p if p >= 755 => DimSchema::V1_17,
         _ => DimSchema::V1_16_2,
     };
@@ -233,9 +244,20 @@ pub fn dimension_type_nbt_for_proto(key: &str, proto: u32) -> Result<Vec<u8>, Pr
 enum DimSchema {
     /// 1.16.2-1.16.5: 13-field set, no height/min_y.
     V1_16_2,
-    /// 1.17-1.19.4: 1.16.2 set + `min_y` + `height`.
+    /// 1.17 / 1.17.1: 1.16.2 set + `min_y` + `height`.
     V1_17,
-    /// 1.20.4+: 1.17 set + spawn-light fields + fixed_time placeholder.
+    /// 1.18 / 1.18.2 (proto 758): identical field set to `V1_17`.
+    /// Given its own variant (rather than folded into `V1_17`) so the
+    /// proto→schema match in `dimension_type_nbt_for_proto` has an
+    /// explicit, documented branch for 758 instead of relying on the
+    /// `>= 755` fallthrough — this is the version that was previously
+    /// missing an explicit mapping.
+    V1_18_2,
+    /// 1.19 - 1.19.4: 1.17 set + `monster_spawn_block_light_limit`
+    /// + `monster_spawn_light_level` per ViaVersion
+    /// `EntityPacketRewriter1_19::addMonsterSpawnData`.
+    V1_19,
+    /// 1.20.4+: 1.19 set + `fixed_time` placeholder.
     V1_20_4,
 }
 
@@ -289,26 +311,58 @@ fn dimension_type_nbt_with_version(key: &str, schema: DimSchema) -> Result<Vec<u
     Ok(buf.to_vec())
 }
 
-/// Augment a base element compound with the per-era extras. Called
-/// after `dimension_type_element` so the base 13-field set is shared
-/// across all eras and only the per-era additions live here.
+/// Insert era-specific integer fields into a dimension-type compound.
+///
+/// For compound `element` values this adds or overrides integer keys required by
+/// the given `schema`:
+/// - V1_16_2: no additions.
+/// - V1_17 and V1_18_2: `min_y = 0`, `height = 256`.
+/// - V1_19: `min_y = 0`, `height = 256`, `monster_spawn_block_light_limit = 0`,
+///   `monster_spawn_light_level = 11`.
+/// - V1_20_4: `min_y = 0`, `height = 256` (other 1.20.4 fields are added by
+///   the base element constructor when applicable).
+///
+/// If `element` is not a compound it is returned unchanged.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// // build an empty compound element
+/// let base = NbtTag::Compound(HashMap::new());
+/// let augmented = augment_for_schema(base, DimSchema::V1_17);
+/// match augmented {
+///     NbtTag::Compound(m) => assert!(m.contains_key("min_y") && m.contains_key("height")),
+///     _ => panic!("expected a compound"),
+/// }
+/// ```
 fn augment_for_schema(element: NbtTag, schema: DimSchema) -> NbtTag {
     let NbtTag::Compound(mut m) = element else {
         return element;
     };
     match schema {
         DimSchema::V1_16_2 => {},
-        DimSchema::V1_17 => {
+        DimSchema::V1_17 | DimSchema::V1_18_2 => {
             // 1.17 added `min_y` + `height` per ViaVersion
             // `EntityPacketRewriter1_17::addNewDimensionData`.
             m.insert("min_y".into(), i(0));
             m.insert("height".into(), i(256));
         },
+        DimSchema::V1_19 => {
+            // 1.17 carry-overs.
+            m.insert("min_y".into(), i(0));
+            m.insert("height".into(), i(256));
+            // 1.19 additions per ViaVersion
+            // `EntityPacketRewriter1_19::addMonsterSpawnData`:
+            //   monster_spawn_block_light_limit = 0
+            //   monster_spawn_light_level       = 11
+            m.insert("monster_spawn_block_light_limit".into(), i(0));
+            m.insert("monster_spawn_light_level".into(), i(11));
+        },
         DimSchema::V1_20_4 => {
-            // 1.20.4+: `min_y`/`height` AND the spawn-light fields +
-            // `fixed_time` placeholder. `dimension_type_element` with
-            // `is_1_20_4 = true` already added the spawn-light extras,
-            // so here we only need the 1.17 carry-overs.
+            // 1.20.4+: 1.17 carry-overs + spawn-light fields (already
+            // added by `dimension_type_element` with `is_1_20_4 =
+            // true`) + nothing extra here.
             m.insert("min_y".into(), i(0));
             m.insert("height".into(), i(256));
         },
@@ -322,18 +376,71 @@ mod tests {
 
     #[test]
     fn codec_encodes_to_nonempty() {
-        let b = dimension_codec_nbt().unwrap();
-        assert!(b.len() > 32);
-        // First byte is the Compound tag (10).
-        assert_eq!(b[0], 10);
+        let buf = dimension_codec_nbt().unwrap();
+        assert!(buf.len() > 32);
+        // Root NBT form: first byte is the Compound tag (10).
+        assert_eq!(buf[0], 10);
     }
 
     #[test]
     fn dimension_type_nether_has_no_skylight() {
-        let b = dimension_type_nbt("minecraft:the_nether").unwrap();
-        // The compound starts with tag 10, then i16 name length, then name…
-        // Just verify it encoded.
-        assert!(b.len() > 16);
-        assert_eq!(b[0], 10);
+        let buf = dimension_type_nbt("minecraft:the_nether").unwrap();
+        assert!(buf.len() > 16);
+        // The Notchian client's NBT reader requires a top-level value to be
+        // a *named* compound tag, even when the name is empty: the buffer
+        // must start with TAG_Compound (10) followed by a 2-byte empty
+        // name-length prefix (0x00 0x00). Stripping this prefix produces an
+        // invalid NBT stream and triggers "Root tag must be a named compound
+        // tag" client-side.
+        assert_eq!(buf[0], 10);
+        assert!(buf[1] == 0 && buf[2] == 0);
+    }
+
+    #[test]
+    fn dimension_type_1_18_2_matches_1_17_field_set() {
+        let v117 = dimension_type_nbt_for_proto("minecraft:overworld", 756).unwrap();
+        let v1182 = dimension_type_nbt_for_proto("minecraft:overworld", 758).unwrap();
+        assert_eq!(v117.len(), v1182.len());
+    }
+
+    #[test]
+    fn dimension_type_1_18_2_differs_from_1_16_2() {
+        let v1162 = dimension_type_nbt_for_proto("minecraft:overworld", 754).unwrap();
+        let v1182 = dimension_type_nbt_for_proto("minecraft:overworld", 758).unwrap();
+        // 1.18.2 has two extra Int fields (min_y, height) vs 1.16.2.
+        assert!(v1182.len() > v1162.len());
+    }
+
+    #[test]
+    fn dimension_type_nbt_matches_raw_nbt_encode_for_same_compound() {
+        // `dimension_type_nbt` must produce exactly the same bytes as
+        // `Nbt::encode` for the equivalent compound — there is no separate
+        // "headless" form. This is the wire format Join Game / Respawn embed
+        // for the inline dimension-type tag.
+        let actual = dimension_type_nbt("minecraft:overworld").unwrap();
+
+        let mut root = HashMap::new();
+        if let NbtTag::Compound(m) = augment_for_schema(
+            dimension_type_element(
+                true,
+                false,
+                false,
+                true,
+                "minecraft:infiniburn_overworld",
+                "minecraft:overworld",
+                false,
+            ),
+            DimSchema::V1_16_2,
+        ) {
+            root = m;
+        }
+        let nbt = Nbt {
+            name: String::new(),
+            root,
+        };
+        let mut expected = BytesMut::new();
+        nbt.encode(&mut expected).unwrap();
+
+        assert_eq!(actual.len(), expected.len());
     }
 }

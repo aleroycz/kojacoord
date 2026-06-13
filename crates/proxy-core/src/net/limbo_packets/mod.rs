@@ -14,9 +14,142 @@
 //! `None` returned from a builder means "this version doesn't speak
 //! that packet" (e.g. pre-netty has no BossBar). The handler skips it.
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use kojacoord_protocol::CanonicalVersion;
 use uuid::Uuid;
+
+/// Heightmaps wire encoding for `LevelChunkWithLight`, which changed
+/// twice in the modern era:
+///   * [`NamedNbt`]  — ≤ 1.20.1 (proto ≤ 763): a *named* NBT compound.
+///   * [`AnonNbt`]   — 1.20.2 – 1.21.4 (764-769): a *nameless* network
+///     NBT compound.
+///   * [`Array`]     — 1.21.5+ (770+): a length-prefixed array of
+///     `{VarInt type, LongArray data}` (per ViaVersion
+///     `BlockItemPacketRewriter1_21_5`; an empty array is valid).
+#[derive(Clone, Copy)]
+pub(crate) enum HeightmapFmt {
+    NamedNbt,
+    AnonNbt,
+    Array,
+}
+
+/// Builds a single void (all-air) `LevelChunkWithLight` body for chunk (0,0).
+///
+/// The returned buffer encodes an all-air chunk with `sections` vertical sections
+/// (height / 16), optional legacy `trust_edges` byte (present in protocols ≤ 762),
+/// and a heightmap encoded according to `hm`. Sections use single-valued palettes
+/// (air block state 0, biome id 0). Light masks are set to indicate every light
+/// section is present but contains zeroed data so clients treat the chunk as fully lit.
+///
+/// # Examples
+///
+/// ```
+/// // Construct a 24-section void chunk using named NBT heightmaps and legacy trust_edges.
+/// let body = limbo_packets::void_chunk_body(24, true, limbo_packets::HeightmapFmt::NamedNbt);
+/// assert!(!body.is_empty());
+/// ```
+pub(crate) fn void_chunk_body(sections: usize, trust_edges: bool, hm: HeightmapFmt) -> BytesMut {
+    use kojacoord_protocol::codec::Encode;
+    use kojacoord_protocol::types::VarInt;
+
+    let mut body = BytesMut::new();
+    body.put_i32(0); // chunk x
+    body.put_i32(0); // chunk z
+
+    // Heightmaps. The NBT eras carry a MOTION_BLOCKING long array (256
+    // entries @ 9 bits = 37 longs, all zero) — matching the proven
+    // 1.18-1.19.4 limbo path. The 1.21.5+ array era accepts an empty
+    // array (ViaVersion `EMPTY_HEIGHTMAPS`).
+    match hm {
+        HeightmapFmt::NamedNbt => {
+            body.put_u8(0x0a); // TAG_Compound
+            body.put_u16(0); // empty name
+            put_motion_blocking_field(&mut body);
+            body.put_u8(0x00); // TAG_End
+        },
+        HeightmapFmt::AnonNbt => {
+            body.put_u8(0x0a); // TAG_Compound, no name (network NBT)
+            put_motion_blocking_field(&mut body);
+            body.put_u8(0x00); // TAG_End
+        },
+        HeightmapFmt::Array => {
+            let _ = VarInt(0).encode(&mut body); // empty heightmap array
+        },
+    }
+
+    // chunkData: `sections` empty sections.
+    let mut cd = BytesMut::new();
+    for _ in 0..sections {
+        cd.put_i16(0); // non-air block count
+        cd.put_u8(0); // block states: bits per entry = 0 (single value)
+        let _ = VarInt(0).encode(&mut cd); // palette: minecraft:air
+        let _ = VarInt(0).encode(&mut cd); // data array length
+        cd.put_u8(0); // biomes: bits per entry = 0
+        let _ = VarInt(0).encode(&mut cd); // palette: biome registry id 0
+        let _ = VarInt(0).encode(&mut cd); // data array length
+    }
+    let _ = VarInt(cd.len() as i32).encode(&mut body);
+    body.put_slice(&cd);
+
+    let _ = VarInt(0).encode(&mut body); // block entities count
+    if trust_edges {
+        body.put_u8(1); // ≤1.19.4 only
+    }
+
+    // Light: declare EVERY light section explicitly empty rather than
+    // leaving all masks blank. A chunk has `sections + 2` light sections
+    // (one below, one above the buildable range). With all-blank masks
+    // the client's light engine has no information and never marks the
+    // chunk fully lit, so the "Loading terrain" screen never clears even
+    // though the chunk geometry loaded. Setting emptySky/emptyBlock to
+    // cover all light sections (and leaving the data masks empty) tells
+    // it "all sections are lit with zero light" → chunk becomes ready.
+    let light_sections = sections + 2;
+    let empty_mask: i64 = if light_sections >= 64 {
+        -1
+    } else {
+        ((1u64 << light_sections) - 1) as i64
+    };
+    let _ = VarInt(0).encode(&mut body); // skyLightMask (no data sections)
+    let _ = VarInt(0).encode(&mut body); // blockLightMask (no data sections)
+    let _ = VarInt(1).encode(&mut body); // emptySkyLightMask: 1 long
+    body.put_i64(empty_mask);
+    let _ = VarInt(1).encode(&mut body); // emptyBlockLightMask: 1 long
+    body.put_i64(empty_mask);
+    let _ = VarInt(0).encode(&mut body); // sky light array count
+    let _ = VarInt(0).encode(&mut body); // block light array count
+    body
+}
+
+/// Writes a `MOTION_BLOCKING` long-array field of 37 zeroed `i64` values into an open NBT compound.
+///
+/// The field is encoded as: TAG_Long_Array (0x0C), a u16 name length and name bytes for `"MOTION_BLOCKING"`,
+/// a i32 length `37`, followed by 37 `i64(0)` entries. Call this while an NBT compound is already open.
+///
+/// # Examples
+///
+/// ```
+/// use bytes::BytesMut;
+/// // create an open compound: TAG_Compound (0x0a) then empty name
+/// let mut buf = BytesMut::new();
+/// buf.put_u8(0x0a);
+/// buf.put_u16(0);
+/// put_motion_blocking_field(&mut buf);
+/// // close compound
+/// buf.put_u8(0x00);
+/// // buf now contains a compound with a MOTION_BLOCKING long-array of 37 zeros
+/// assert!(buf.len() > 0);
+/// ```
+fn put_motion_blocking_field(body: &mut BytesMut) {
+    body.put_u8(0x0c); // TAG_Long_Array
+    let name = b"MOTION_BLOCKING";
+    body.put_u16(name.len() as u16);
+    body.put_slice(name);
+    body.put_i32(37);
+    for _ in 0..37 {
+        body.put_i64(0);
+    }
+}
 
 // Canonical buckets — own struct construction logic.
 pub mod v1_12;
@@ -113,6 +246,91 @@ pub trait LimboPackets: Send + Sync {
     /// Build a clientbound PluginMessage containing the server brand.
     fn brand(&self, proto: u32, brand: &str) -> Option<EncodedPacket>;
 
+    /// Constructs a SetChunkCacheCenter (Update View Position) packet that sets the chunk-cache center to chunk (0, 0).
+    ///
+    /// This packet ensures the client will accept and retain subsequently received chunks around that center; without it some clients may discard the void chunk and remain stuck in "Loading terrain".
+    ///
+    /// # Parameters
+    ///
+    /// - `proto`: negotiated wire protocol number used to select the appropriate packet id/format for the target client version.
+    ///
+    /// # Returns
+    ///
+    /// `Some(EncodedPacket)` containing the encoded SetChunkCacheCenter packet for the given protocol, or `None` if the protocol does not use this packet.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // `my_impl` implements `LimboPackets`
+    /// let pkt = my_impl.set_center_chunk(763);
+    /// if let Some(encoded) = pkt {
+    ///     // send or inspect `encoded`
+    /// }
+    /// ```
+    fn set_center_chunk(&self, _proto: u32) -> Option<EncodedPacket> {
+        None
+    }
+
+    /// ```
+    fn chunk_batch_start(&self, _proto: u32) -> Option<EncodedPacket> {
+        None
+    }
+
+    /// Builds a `ChunkBatchFinished` packet that carries the number of chunks in the batch for protocols that support it (1.20.2+).
+    ///
+    /// The returned packet, when present, should be sent to the client; the client will reply with an acknowledgement which this codebase ignores.
+    ///
+    /// # Parameters
+    ///
+    /// - `batch_size`: the number of chunks included in the finished batch.
+    ///
+    /// # Returns
+    ///
+    /// `Some(EncodedPacket)` with the encoded packet id and body when the protocol exposes this packet, `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // For a protocol that supports ChunkBatchFinished (1.20.2+)
+    /// let pkt = v1_20::V1_20.chunk_batch_finished(764, 16);
+    /// assert!(pkt.is_some());
+    /// ```
+    fn chunk_batch_finished(&self, _proto: u32, _batch_size: i32) -> Option<EncodedPacket> {
+        None
+    }
+
+    /// Builds the GameEvent packet (event ID 13) that tells the client to stop showing the "Loading terrain" screen.
+    ///
+    /// This packet is required beginning with protocol 765 (Minecraft 1.20.3+); for older protocol numbers this method returns `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Example usage: protocol 765 and newer produce a packet, older protocols do not.
+    /// # let svc = &crate::net::limbo_packets::v1_21::V1_21;
+    /// let _ = svc.start_wait_chunks_event(765); // Some(EncodedPacket)
+    /// let _ = svc.start_wait_chunks_event(760); // None
+    /// ```
+    fn start_wait_chunks_event(&self, _proto: u32) -> Option<EncodedPacket> {
+        None
+    }
+
+    /// Build a single void (all-air) level chunk at coordinates (0, 0) encoded as a `LevelChunkWithLight`.
+    ///
+    /// This chunk is intended for limbo use so clients receive at least the chunk containing the player; some modern clients (1.18+) remain on the loading screen until that chunk arrives. Implementations may return `None` when the canonical version does not synthesize void chunks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Select a canonical bucket and request its limbo chunk for a protocol.
+    /// let pkt = v1_20::V1_20.chunk_data(763);
+    /// // Modern canonical buckets that implement void chunk synthesis should return Some(EncodedPacket).
+    /// assert!(pkt.is_some());
+    /// ```
+    fn chunk_data(&self, _proto: u32) -> Option<EncodedPacket> {
+        None
+    }
+
     /// 1.6.x-only essentials. Returning `None` by default makes the
     /// other canonical buckets no-op these — modern clients don't
     /// need a SpawnPosition broadcast to render their HUD; they take
@@ -155,9 +373,20 @@ pub fn for_version(canonical: CanonicalVersion) -> &'static dyn LimboPackets {
     }
 }
 
-/// Helper used by every impl: encode a typed packet into an
-/// [`EncodedPacket`] using `PacketId::packet_id(proto)` for the id and
-/// `Encode::encode` for the body.
+/// Encode a typed packet into an `EncodedPacket` using the packet's protocol id and its wire encoding.
+///
+/// Returns `None` when the packet id for the given `proto` is `0xFF` or when encoding fails.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use bytes::BytesMut;
+/// // `MyPkt` must implement `kojacoord_protocol::codec::PacketId` and `kojacoord_protocol::codec::Encode`.
+/// // The call below returns `Some(EncodedPacket)` when the packet id is not 0xFF and encoding succeeds.
+/// let proto: u32 = 763;
+/// let pkt = MyPkt::new();
+/// let encoded = crate::net::limbo_packets::encode(proto, pkt);
+/// ```
 pub(crate) fn encode<T: kojacoord_protocol::codec::Encode + kojacoord_protocol::codec::PacketId>(
     proto: u32,
     pkt: T,
@@ -169,4 +398,159 @@ pub(crate) fn encode<T: kojacoord_protocol::codec::Encode + kojacoord_protocol::
     let mut body = BytesMut::new();
     pkt.encode(&mut body).ok()?;
     Some(EncodedPacket { id, body })
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::*;
+    use bytes::Buf;
+    use kojacoord_protocol::codec::Decode;
+    use kojacoord_protocol::types::VarInt;
+
+    /// Asserts that a generated void LevelChunkWithLight body parses exactly as expected for a given
+    /// heightmap format and trust_edges flag.
+    ///
+    /// This test helper builds a void chunk body at (0,0) with `sections` sections using
+    /// `void_chunk_body` and verifies the wire-format fields (coordinates, heightmaps, chunk data
+    /// length/content, block entity count, optional trust_edges byte, light masks and arrays) are
+    /// present and fully consumed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Validate parsing for 24 sections, trust_edges = true, using named NBT heightmaps.
+    /// assert_parses(24, true, HeightmapFmt::NamedNbt);
+    /// ```
+    fn assert_parses(sections: usize, trust_edges: bool, hm: HeightmapFmt) {
+        let body = void_chunk_body(sections, trust_edges, hm);
+        let mut b = body.freeze();
+        assert_eq!(b.get_i32(), 0);
+        assert_eq!(b.get_i32(), 0);
+        match hm {
+            HeightmapFmt::NamedNbt => {
+                assert_eq!(b.get_u8(), 0x0a); // compound
+                let nl = b.get_u16(); // empty name
+                b.advance(nl as usize);
+                // MOTION_BLOCKING long array field
+                assert_eq!(b.get_u8(), 0x0c);
+                let knl = b.get_u16();
+                b.advance(knl as usize);
+                let n = b.get_i32();
+                b.advance(n as usize * 8);
+                assert_eq!(b.get_u8(), 0x00); // end
+            },
+            HeightmapFmt::AnonNbt => {
+                assert_eq!(b.get_u8(), 0x0a); // compound, no name
+                assert_eq!(b.get_u8(), 0x0c);
+                let knl = b.get_u16();
+                b.advance(knl as usize);
+                let n = b.get_i32();
+                b.advance(n as usize * 8);
+                assert_eq!(b.get_u8(), 0x00);
+            },
+            HeightmapFmt::Array => {
+                assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // empty array
+            },
+        }
+        let cd = VarInt::decode(&mut b).unwrap().0 as usize;
+        assert_eq!(cd, sections * 8, "8 bytes per empty section");
+        b.advance(cd);
+        assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // block entities
+        if trust_edges {
+            assert_eq!(b.get_u8(), 1);
+        }
+        assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // skyLightMask (no data)
+        assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // blockLightMask
+                                                          // emptySkyLightMask: 1 long covering all `sections + 2` light sections
+        assert_eq!(VarInt::decode(&mut b).unwrap().0, 1);
+        let expected = if sections + 2 >= 64 {
+            -1i64
+        } else {
+            ((1u64 << (sections + 2)) - 1) as i64
+        };
+        assert_eq!(
+            b.get_i64(),
+            expected,
+            "emptySkyLightMask covers all sections"
+        );
+        assert_eq!(VarInt::decode(&mut b).unwrap().0, 1); // emptyBlockLightMask
+        assert_eq!(b.get_i64(), expected);
+        assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // sky light arrays
+        assert_eq!(VarInt::decode(&mut b).unwrap().0, 0); // block light arrays
+        assert_eq!(b.remaining(), 0, "no trailing bytes");
+    }
+
+    #[test]
+    fn void_chunk_all_eras_parse() {
+        assert_parses(24, true, HeightmapFmt::NamedNbt); // ≤1.19.4 style
+        assert_parses(24, false, HeightmapFmt::NamedNbt); // 1.20/1.20.1
+        assert_parses(24, false, HeightmapFmt::AnonNbt); // 1.20.2-1.21.4
+        assert_parses(24, false, HeightmapFmt::Array); // 1.21.5+
+    }
+
+    /// 1.20/1.20.1 (763) JoinGame must carry the inline registry codec
+    /// and fully parse (the 1.19.4 shape + trailing portal_cooldown).
+    #[test]
+    fn proto_763_join_game_has_inline_codec_and_parses() {
+        use kojacoord_protocol::types::nbt::Nbt;
+
+        let pkt = v1_20::V1_20
+            .join_game(763, "minecraft:overworld")
+            .expect("763 join");
+        let mut b = pkt.body.clone().freeze();
+        let _eid = b.get_i32();
+        let _hc = b.get_u8();
+        let _gm = b.get_u8();
+        let _pgm = b.get_i8();
+        let dc = VarInt::decode(&mut b).unwrap().0;
+        for _ in 0..dc {
+            let _ = String::decode(&mut b).unwrap();
+        }
+        Nbt::decode(&mut b).expect("inline registry codec decodes");
+        let _dt = String::decode(&mut b).expect("dimension_type");
+        let _dn = String::decode(&mut b).expect("dimension_name");
+        let _seed = b.get_i64();
+        let _max = VarInt::decode(&mut b).unwrap();
+        let _vd = VarInt::decode(&mut b).unwrap();
+        let _sd = VarInt::decode(&mut b).unwrap();
+        let _rdi = b.get_u8();
+        let _ers = b.get_u8();
+        let _dbg = b.get_u8();
+        let _flat = b.get_u8();
+        let _death = b.get_u8();
+        let _portal = VarInt::decode(&mut b).unwrap();
+        assert_eq!(b.remaining(), 0, "763 JoinGame not fully consumed");
+    }
+
+    #[test]
+    fn v1_20_v1_21_chunk_and_center_build() {
+        // Every modern proto must yield a chunk + center packet.
+        for proto in [763u32, 764, 765, 766] {
+            assert!(
+                v1_20::V1_20.chunk_data(proto).is_some(),
+                "v1_20 chunk {proto}"
+            );
+            assert!(
+                v1_20::V1_20.set_center_chunk(proto).is_some(),
+                "v1_20 center {proto}"
+            );
+        }
+        for proto in [767u32, 768, 769, 770, 771, 772, 773, 774] {
+            assert!(
+                v1_21::V1_21.chunk_data(proto).is_some(),
+                "v1_21 chunk {proto}"
+            );
+            assert!(
+                v1_21::V1_21.set_center_chunk(proto).is_some(),
+                "v1_21 center {proto}"
+            );
+        }
+        // batching only 764+, game event only 765+
+        assert!(v1_20::V1_20.chunk_batch_start(763).is_none());
+        assert!(v1_20::V1_20.chunk_batch_start(764).is_some());
+        assert!(v1_20::V1_20.start_wait_chunks_event(764).is_none());
+        assert!(v1_20::V1_20.start_wait_chunks_event(765).is_some());
+        assert!(v1_21::V1_21.chunk_batch_start(770).is_some());
+        assert!(v1_21::V1_21.start_wait_chunks_event(774).is_some());
+    }
 }

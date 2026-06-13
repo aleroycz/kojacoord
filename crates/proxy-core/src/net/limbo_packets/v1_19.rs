@@ -118,6 +118,20 @@ impl LimboPackets for V1_19 {
         encode(proto, p::ClientboundSetCarriedItem { slot: 0 })
     }
 
+    /// Builds a ClientboundPlayerPosition packet tailored to the specified protocol version.
+    ///
+    /// For protocol versions 755..=761 the encoded body includes a trailing `dismount_vehicle` boolean
+    /// byte immediately after the `teleport_id`. For other supported protocol versions the encoded
+    /// body uses the 1.19.4+ shape that omits the `dismount_vehicle` byte.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let v = V1_19;
+    /// let pos = PlayerPos { x: 0.0, y: 64.0, z: 0.0, yaw: 0.0, pitch: 0.0 };
+    /// let pkt = v.player_position(761, pos, 1).unwrap();
+    /// assert!(!pkt.body.is_empty());
+    /// ```
     fn player_position(
         &self,
         proto: u32,
@@ -125,20 +139,21 @@ impl LimboPackets for V1_19 {
         teleport_id: i32,
     ) -> Option<EncodedPacket> {
         // 1.17 / 1.17.1 / 1.18 / 1.18.2 / 1.19 / 1.19.1 / 1.19.2 /
-        // 1.19.3 (proto 755 - 762) carry a trailing
+        // 1.19.3 (proto 755 - 761) carry a trailing
         // `dismount_vehicle: bool` byte after `teleport_id`. Mojang
-        // added it at 1.17 (per ViaVersion
-        // `EntityPacketRewriter1_17` line 144: `create(Types.BOOLEAN,
-        // false); // Dismount vehicle`) and removed it at 1.19.4
-        // (per `EntityPacketRewriter1_19_4` line 93:
-        // `if (wrapper.read(Types.BOOLEAN)) { // Dismount vehicle`).
+        // added it at 1.17 (per ViaVersion `EntityPacketRewriter1_17`:
+        // `create(Types.BOOLEAN, false); // Dismount vehicle`) and
+        // removed it at 1.19.4 (proto 762) — ViaVersion's 1.19.3→1.19.4
+        // `EntityPacketRewriter1_19_4` line 93 READS the boolean from
+        // the 1.19.3 packet and drops it. minecraft-data confirms:
+        // `pc/1.19.2` packet_position ends in `dismountVehicle`,
+        // `pc/1.19.4` does not.
         //
-        // The v1_19 typed encoder doesn't emit the byte, so without
-        // this guard the 1.17 client expects 36 wire bytes and gets
-        // 35 — exact match for the user-reported
-        // `readerIndex(35) + length(1) exceeds writerIndex(35)`
-        // disconnect.
-        if (755..=762).contains(&proto) {
+        // 762+ falls through to the typed encoder below, which emits the
+        // dismount-less 1.19.4 shape. Including 762 here sent one byte
+        // too many — the user-reported "ClientboundPlayerPosition was
+        // larger than I expected, found 1 byte extra".
+        if (755..=761).contains(&proto) {
             use kojacoord_protocol::codec::PacketId;
             let pid = p::ClientboundPlayerPosition::packet_id(proto);
             if pid == 0xFF {
@@ -197,6 +212,30 @@ impl LimboPackets for V1_19 {
         )
     }
 
+    /// Encodes a clientbound music-disc sound packet shaped for the specified protocol version.
+    ///
+    /// Builds the wire-format for the `minecraft:music_disc.cat` sound event using the packet shape
+    /// expected by the given `proto`. Behavior by proto range:
+    /// - 755–758: legacy NamedSoundEffect shape (Identifier name, VarInt category, scaled i32 positions,
+    ///   f32 volume, f32 pitch).
+    /// - 759–760: prefix-less 1.19/1.19.1/1.19.2 custom-sound shape (name length + name, VarInt category,
+    ///   scaled i32 positions, f32 volume, f32 pitch, i64 seed).
+    /// - 761+: Holder<SoundEvent> inline form (VarInt 0, name length + name, a `fixed_range` option byte,
+    ///   VarInt category, scaled i32 positions, f32 volume, f32 pitch, i64 seed).
+    ///
+    /// Returns `Some(EncodedPacket)` containing the correctly encoded packet body and packet id for the
+    /// target proto, or `None` if the packet id is unsupported for that proto or required encodings fail.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use uuid::Uuid;
+    /// // Construct params with the same public fields used by the codebase.
+    /// let params = crate::net::limbo_packets::SoundParams { x: 0.0, y: 64.0, z: 0.0, volume: 1.0, pitch: 1.0 };
+    /// let v = crate::net::limbo_packets::v1_19::V1_19;
+    /// let pkt = v.note_sound(759, params);
+    /// assert!(pkt.is_some());
+    /// ```
     fn note_sound(&self, proto: u32, pos: SoundParams) -> Option<EncodedPacket> {
         // Sound packet wire shape across this canonical bucket:
         //   proto 755 - 758 (1.17 / 1.18.x): legacy NamedSoundEffect
@@ -228,22 +267,91 @@ impl LimboPackets for V1_19 {
                 },
             );
         }
-        encode(
-            proto,
-            kojacoord_protocol::versions::v1_21_x::play::ClientboundSound {
-                sound_name: "minecraft:music_disc.cat".to_owned(),
-                sound_category: VarInt(2),
-                sound_type: VarInt(0),
-                effect_pos_x: (pos.x * 8.0) as i32,
-                effect_pos_y: (pos.y * 8.0) as i32,
-                effect_pos_z: (pos.z * 8.0) as i32,
-                volume: pos.volume,
-                pitch: pos.pitch,
-                seed: 0,
-            },
-        )
+        // proto 759 - 760 (1.19 / 1.19.1 / 1.19.2): string-named sound
+        // (`ClientboundCustomSoundEffect`) — `[Identifier name][VarInt
+        // category][i32 x*8][i32 y*8][i32 z*8][f32 vol][f32 pitch][i64
+        // seed]`. The `seed` trailer exists from 1.19.0, but the
+        // `sound_type` VarInt holder prefix is 1.19.3+ ONLY. ViaVersion
+        // confirms this: `Protocol1_19_1To1_19_3` rewrites the old
+        // string-based `CUSTOM_SOUND` into `Types.SOUND_EVENT` (the
+        // holder) only at 1.19.3, so 759/760 carry no prefix.
+        //
+        // The v1_21_x `ClientboundSound` encoder below writes the
+        // 1.19.3+ shape with a leading `sound_type` VarInt(0). Sending
+        // that to a 1.19/1.19.2 client makes it read our `sound_type`
+        // byte as the `sound_name` string length, shifting every
+        // subsequent field — the misaligned string length surfaces as
+        // the client-side `IndexOutOfBoundsException` on a corrupt
+        // VarInt. Hand-encode the correct prefix-less shape here.
+        if (759..=760).contains(&proto) {
+            let pid =
+                kojacoord_protocol::versions::v1_21_x::play::ClientboundSound::packet_id(proto);
+            if pid == 0xFF {
+                return None;
+            }
+            let mut body = BytesMut::new();
+            let name = b"minecraft:music_disc.cat";
+            VarInt(name.len() as i32).encode(&mut body).ok()?;
+            body.put_slice(name);
+            VarInt(2).encode(&mut body).ok()?; // sound_category
+            body.put_i32((pos.x * 8.0) as i32);
+            body.put_i32((pos.y * 8.0) as i32);
+            body.put_i32((pos.z * 8.0) as i32);
+            body.put_f32(pos.volume);
+            body.put_f32(pos.pitch);
+            body.put_i64(0); // seed
+            return Some(EncodedPacket { id: pid, body });
+        }
+        // proto 761+ (1.19.3 / 1.19.4): the sound field is a
+        // `Holder<SoundEvent>` — `[VarInt sound_id]` where 0 means an
+        // INLINE sound event: `[Identifier name][option<f32> fixed_range]`
+        // (the option is a leading `bool`, false here). minecraft-data
+        // `pc/1.19.4` `ItemSoundHolder`/`ItemSoundEvent` confirm the
+        // `fixed_range` option. The shared `v1_21_x::ClientboundSound`
+        // encoder omits that bool, so the client read every following
+        // field shifted by one byte and over-ran `seed` at the end
+        // (`readerIndex(53)+length(8) exceeds writerIndex(56)`). Hand-
+        // encode the holder with the option byte present.
+        let pid = kojacoord_protocol::versions::v1_21_x::play::ClientboundSound::packet_id(proto);
+        if pid == 0xFF {
+            return None;
+        }
+        let mut body = BytesMut::new();
+        VarInt(0).encode(&mut body).ok()?; // sound_id 0 = inline event
+        let name = b"minecraft:music_disc.cat";
+        VarInt(name.len() as i32).encode(&mut body).ok()?;
+        body.put_slice(name);
+        body.put_u8(0); // fixed_range option: absent
+        VarInt(2).encode(&mut body).ok()?; // sound_category
+        body.put_i32((pos.x * 8.0) as i32);
+        body.put_i32((pos.y * 8.0) as i32);
+        body.put_i32((pos.z * 8.0) as i32);
+        body.put_f32(pos.volume);
+        body.put_f32(pos.pitch);
+        body.put_i64(0); // seed
+        Some(EncodedPacket { id: pid, body })
     }
 
+    /// Add a boss bar for the given UUID with the provided title.
+    ///
+    /// The resulting packet uses the BossBar `Add` action (health = 1.0, color = 1, division = 0, flags = 0).
+    ///
+    /// # Parameters
+    ///
+    /// - `proto`: protocol version used to select the packet id and wire format; may cause `None` if unsupported.
+    ///
+    /// # Returns
+    ///
+    /// `Some(EncodedPacket)` containing a BossBar `Add` action for the given UUID and title, or `None` if the packet id/wire shape is unsupported for `proto`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let v = V1_19;
+    /// let id = uuid::Uuid::new_v4();
+    /// let pkt = v.bossbar_add(762, id, "Hello world");
+    /// assert!(pkt.is_some());
+    /// ```
     fn bossbar_add(&self, proto: u32, uuid: Uuid, title: &str) -> Option<EncodedPacket> {
         encode(
             proto,
@@ -274,6 +382,18 @@ impl LimboPackets for V1_19 {
         encode(proto, p::ClientboundKeepAlive { id })
     }
 
+    /// Constructs a `minecraft:brand` plugin-message packet containing the given brand string.
+    ///
+    /// The payload is the brand length encoded as a VarInt followed by the raw brand bytes.
+    /// Returns `Some(EncodedPacket)` containing the plugin message for the specified protocol, or `None` if encoding fails for that protocol.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let v = V1_19;
+    /// let pkt = v.brand(762, "my-proxy").expect("should encode");
+    /// // `pkt` is an EncodedPacket ready to be sent to a client
+    /// ```
     fn brand(&self, proto: u32, brand: &str) -> Option<EncodedPacket> {
         let mut data = BytesMut::new();
         VarInt(brand.len() as i32).encode(&mut data).ok()?;
@@ -286,23 +406,90 @@ impl LimboPackets for V1_19 {
             },
         )
     }
+
+    /// Constructs the per-protocol "SetChunkCacheCenter" / Update View Position packet with chunk coordinates set to (0, 0).
+    ///
+    /// The chosen packet id depends on `proto`:
+    /// - 755..=758 → 0x49
+    /// - 759 → 0x48
+    /// - 760 → 0x4b
+    /// - 761 → 0x4a
+    /// - 762 → 0x4e
+    ///   Returns `None` for unsupported protocol versions. The packet body contains two VarInts (chunk x and chunk z), both zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let v = V1_19;
+    /// let pkt = v.set_center_chunk(759).unwrap();
+    /// assert_eq!(pkt.id, 0x48);
+    /// ```
+    fn set_center_chunk(&self, proto: u32) -> Option<EncodedPacket> {
+        // `SetChunkCacheCenter` / Update View Position = `[VarInt x][VarInt z]`.
+        // Not in the central registry, so the per-proto id is pinned here
+        // (minecraft-data `protocol.json` + ViaVersion
+        // `ClientboundPackets1_19_3`). Must precede the void chunk or the
+        // client discards it and stays on "Loading terrain".
+        let id: u8 = match proto {
+            755..=758 => 0x49, // 1.17 / 1.17.1 / 1.18 / 1.18.2
+            759 => 0x48,       // 1.19
+            760 => 0x4b,       // 1.19.1 / 1.19.2
+            761 => 0x4a,       // 1.19.3
+            762 => 0x4e,       // 1.19.4
+            _ => return None,
+        };
+        let mut body = BytesMut::new();
+        VarInt(0).encode(&mut body).ok()?; // chunk x
+        VarInt(0).encode(&mut body).ok()?; // chunk z
+        Some(EncodedPacket { id, body })
+    }
+
+    /// Builds a "void" ClientboundLevelChunkWithLight packet body for the given protocol version.
+    ///
+    /// Chooses the section count based on the protocol: 16 sections when `proto <= 756`, 24 sections otherwise,
+    /// and uses the named-NBT heightmap / trust_edges era layout. Returns `None` if the protocol registry does not
+    /// define an id for `ClientboundLevelChunkWithLight`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let v = V1_19;
+    /// assert!(v.chunk_data(759).is_some());
+    /// ```
+    fn chunk_data(&self, proto: u32) -> Option<EncodedPacket> {
+        // `ClientboundLevelChunkWithLight` (1.18 combined chunk+light).
+        // 755-762 are the named-NBT-heightmap, `trust_edges`-present era.
+        // Section count = world_height / 16: 1.17 overworld is 256 high
+        // (16 sections); 1.18+ raised it to 384 (24). Built by the shared
+        // `void_chunk_body` so the light-mask handling stays consistent
+        // with the v1_20/v1_21 buckets.
+        let pid = kojacoord_protocol::registry::cb_play(proto, "ClientboundLevelChunkWithLight");
+        if pid == 0xFF {
+            return None;
+        }
+        let sections = if proto <= 756 { 16 } else { 24 };
+        let body = super::void_chunk_body(sections, true, super::HeightmapFmt::NamedNbt);
+        Some(EncodedPacket { id: pid, body })
+    }
 }
 
-/// Hand-encode the 1.17 / 1.18 JoinGame.
+/// Hand-encodes a JoinGame (ClientboundLogin) packet for Minecraft 1.17–1.18 protos.
 ///
-/// Wire shape (BungeeCord `Login.java::read` 1.17 / 1.18 branches +
-/// minecraft.wiki Java_Edition_protocol §Join_Game):
+/// Builds the exact wire-format used by 1.17/1.18 clients, including:
+/// - entity id, hardcore flag, game mode and previous game mode
+/// - a dimensions list containing `world_name`
+/// - the registry codec (NBT-framed) and the inline dimension NBT for `minecraft:overworld`
+/// - the repeated world name string, hashed seed, player limits, view/simulation distances,
+///   and the protocol-specific trailing booleans.
 ///
-/// ```text
-/// [i32 entity_id] [bool is_hardcore] [u8 game_mode] [i8 previous_game_mode]
-/// [VarInt dim_count + N × String world_name]
-/// [NBT registry_codec]
-/// [NBT dimension_type]                  ; ← NBT compound, NOT Identifier
-/// [String world_name]
-/// [i64 hashed_seed] [VarInt max_players] [VarInt view_distance]
-/// [VarInt simulation_distance ← 1.18 only, 757/758]
-/// [bool reduced_debug_info] [bool enable_respawn_screen]
-/// [bool is_debug] [bool is_flat]
+/// Returns `None` if the packet id for `ClientboundLogin` is unavailable for `proto`
+/// or if necessary codec/NBT builders fail.
+///
+/// # Examples
+///
+/// ```
+/// let pkt = build_join_game_1_17_or_1_18(757, "minecraft:overworld");
+/// assert!(pkt.is_some());
 /// ```
 fn build_join_game_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedPacket> {
     let pid = p::ClientboundLogin::packet_id(proto);
@@ -310,7 +497,10 @@ fn build_join_game_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedP
         return None;
     }
     let registry_codec = crate::protocol::build_dimension_codec_for_proto(proto).ok()?;
-    let dimension_nbt = kojacoord_protocol::dimension_codec::dimension_type_nbt_for_proto(
+    // Inline dimension MUST match the registry's overworld element
+    // byte-for-byte (same #infiniburn / min_y / height) or the 1.18.x
+    // client's strict DimensionType codec rejects it.
+    let dimension_nbt = crate::protocol::dimension_codec::inline_dimension_nbt_for_proto(
         "minecraft:overworld",
         proto,
     )
@@ -350,21 +540,29 @@ fn build_join_game_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedP
     Some(EncodedPacket { id: pid, body })
 }
 
-/// Hand-encode the 1.17 / 1.18 Respawn.
+/// Build a hand-encoded Clientbound Respawn packet matching the 1.17/1.18 wire shape.
 ///
-/// Wire shape:
-/// ```text
-/// [NBT dimension_type] [String world_name]
-/// [i64 hashed_seed] [u8 game_mode] [i8 previous_game_mode]
-/// [bool is_debug] [bool is_flat] [bool copy_metadata]
+/// Encodes the respawn packet fields in the order required by protocols in the 1.17–1.18 range:
+/// an inline dimension NBT for the overworld, the world name string, hashed seed, game mode,
+/// previous game mode, and the three trailing boolean bytes (is_debug, is_flat, copy_metadata).
+///
+/// Returns `Some(EncodedPacket)` containing the encoded ClientboundRespawn for the given `proto` and
+/// `world_name`, or `None` if the packet id for `proto` is unavailable or constructing the
+/// inline dimension NBT fails.
+///
+/// # Examples
+///
 /// ```
-/// The 1.19+ `data_kept` byte and `death_location` optional are absent.
+/// // Ensure a packet can be constructed for a 1.17-era protocol.
+/// let pkt = build_respawn_1_17_or_1_18(755, "minecraft:overworld");
+/// assert!(pkt.is_some());
+/// ```
 fn build_respawn_1_17_or_1_18(proto: u32, world_name: &str) -> Option<EncodedPacket> {
     let pid = p::ClientboundRespawn::packet_id(proto);
     if pid == 0xFF {
         return None;
     }
-    let dimension_nbt = kojacoord_protocol::dimension_codec::dimension_type_nbt_for_proto(
+    let dimension_nbt = crate::protocol::dimension_codec::inline_dimension_nbt_for_proto(
         "minecraft:overworld",
         proto,
     )
@@ -432,14 +630,22 @@ mod ship_check {
     }
 
     #[test]
-    fn proto_762_player_position_body_is_35_bytes_with_dismount() {
-        // 1.19.3 — last proto with dismount_vehicle.
-        assert_eq!(body_len(762), 35);
+    fn proto_761_player_position_body_is_35_bytes_with_dismount() {
+        // 1.19.3 — LAST proto with dismount_vehicle.
+        assert_eq!(body_len(761), 35);
+    }
+
+    #[test]
+    fn proto_762_player_position_body_is_34_bytes_no_dismount() {
+        // 1.19.4 — Mojang removed dismount_vehicle here (proto 762), not
+        // 763. Including 762 in the dismount window sent 1 byte extra and
+        // crashed the 1.19.4 client's PlayerPosition decoder.
+        assert_eq!(body_len(762), 34);
     }
 
     #[test]
     fn proto_763_player_position_body_is_34_bytes_no_dismount() {
-        // 1.19.4 — Mojang removed dismount_vehicle here.
+        // 1.20 — also dismount-less.
         assert_eq!(body_len(763), 34);
     }
 
@@ -471,5 +677,175 @@ mod ship_check {
     #[test]
     fn proto_758_sound_body_is_46_bytes_no_seed_no_sound_type() {
         assert_eq!(sound_body_len(758), 46);
+    }
+
+    /// The void chunk must parse cleanly per the 1.18/1.19
+    /// `LevelChunkWithLight` wire shape with no leftover bytes, and carry
+    /// the height-correct section count (16 for 1.17, 24 for 1.18+).
+    #[test]
+    fn void_chunk_parses_with_correct_section_count() {
+        use bytes::Buf;
+        use kojacoord_protocol::codec::Decode;
+        use kojacoord_protocol::types::nbt::Nbt;
+
+        for (proto, want_sections) in [
+            (755u32, 16),
+            (758, 24),
+            (759, 24),
+            (760, 24),
+            (761, 24),
+            (762, 24),
+        ] {
+            // Every 1.18+ proto must also have a Set Center Chunk packet
+            // or the client discards the chunk and hangs on loading.
+            assert!(
+                V1_19.set_center_chunk(proto).is_some(),
+                "proto {proto} missing set_center_chunk"
+            );
+            let pkt = V1_19.chunk_data(proto).expect("chunk built");
+            let mut b = bytes::Bytes::copy_from_slice(&pkt.body);
+            assert_eq!(b.get_i32(), 0, "chunk x");
+            assert_eq!(b.get_i32(), 0, "chunk z");
+            Nbt::decode(&mut b).expect("heightmaps NBT");
+            let cd_len = VarInt::decode(&mut b).unwrap().0 as usize;
+            // each empty section = 2 (i16) + 3 (block states) + 3 (biomes)
+            assert_eq!(cd_len, want_sections * 8, "proto {proto} chunkData size");
+            b.advance(cd_len);
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "block entities");
+            assert_eq!(b.get_u8(), 1, "trust edges");
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "skyLightMask");
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "blockLightMask");
+            let expected = ((1u64 << (want_sections + 2)) - 1) as i64;
+            assert_eq!(
+                VarInt::decode(&mut b).unwrap().0,
+                1,
+                "emptySkyLightMask len"
+            );
+            assert_eq!(
+                b.get_i64(),
+                expected,
+                "emptySkyLightMask covers all sections"
+            );
+            assert_eq!(
+                VarInt::decode(&mut b).unwrap().0,
+                1,
+                "emptyBlockLightMask len"
+            );
+            assert_eq!(b.get_i64(), expected);
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "sky light arrays");
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "block light arrays");
+            assert_eq!(b.remaining(), 0, "proto {proto} chunk has trailing bytes");
+        }
+    }
+
+    /// 1.19 / 1.19.2 sound = `[VarInt(24) name][VarInt cat][i32×3]`
+    /// `[f32×2][i64 seed]` = 1 + 24 + 1 + 12 + 8 + 8 = 54. Crucially it
+    /// MUST start with the name's length VarInt (24), NOT a `sound_type`
+    /// VarInt(0) holder prefix — that prefix is 1.19.3+ only and sending
+    /// it desyncs the 1.19/1.19.2 client (IndexOutOfBounds on the
+    /// shifted string length).
+    #[test]
+    fn proto_759_760_sound_is_prefixless_with_seed() {
+        for proto in [759u32, 760] {
+            let pkt = V1_19
+                .note_sound(
+                    proto,
+                    SoundParams {
+                        x: 0.0,
+                        y: 256.0,
+                        z: 0.0,
+                        volume: 1.0,
+                        pitch: 1.0,
+                    },
+                )
+                .expect("must build");
+            assert_eq!(
+                pkt.body.len(),
+                54,
+                "proto {proto} sound body must be 54 bytes (no sound_type prefix, has seed)"
+            );
+            assert_eq!(
+                pkt.body[0], 24,
+                "proto {proto} sound must start with name length VarInt(24), not a sound_type prefix"
+            );
+        }
+    }
+
+    /// 1.19.3+ (761/762) sends a `Holder<SoundEvent>`: VarInt(0) inline
+    /// marker, name, then the `fixed_range` option byte, then category /
+    /// pos / vol / pitch / seed. Body = 1 + (1+24) + 1 + 1 + 12 + 8 + 8 =
+    /// 56. The `fixed_range` byte was the missing one that caused the
+    /// `readerIndex(53)+length(8)` seed over-read.
+    #[test]
+    fn proto_761_762_sound_holder_has_fixed_range_option() {
+        use bytes::Buf;
+        use kojacoord_protocol::codec::Decode;
+        for proto in [761u32, 762] {
+            let pkt = V1_19
+                .note_sound(
+                    proto,
+                    SoundParams {
+                        x: 0.0,
+                        y: 256.0,
+                        z: 0.0,
+                        volume: 1.0,
+                        pitch: 1.0,
+                    },
+                )
+                .expect("must build");
+            assert_eq!(pkt.body.len(), 56, "proto {proto} holder sound body");
+            let mut b = bytes::Bytes::copy_from_slice(&pkt.body);
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 0, "inline sound_id 0");
+            let n = VarInt::decode(&mut b).unwrap().0 as usize;
+            b.advance(n); // sound name
+            assert_eq!(b.get_u8(), 0, "fixed_range option absent");
+            assert_eq!(VarInt::decode(&mut b).unwrap().0, 2, "sound_category");
+            b.advance(12 + 8); // pos + vol/pitch
+            assert_eq!(b.get_i64(), 0, "seed fits exactly");
+            assert_eq!(b.remaining(), 0, "no trailing bytes");
+        }
+    }
+
+    /// Parse the proto-759 JoinGame body exactly as a vanilla 1.19
+    /// client would and assert every byte is consumed — a leftover or
+    /// over-read is a framing desync that crashes the client decoder.
+    #[test]
+    fn proto_759_join_game_fully_parses() {
+        use bytes::Buf;
+        use kojacoord_protocol::codec::Decode;
+        use kojacoord_protocol::types::nbt::Nbt;
+
+        let pkt = V1_19
+            .join_game(759, "minecraft:overworld")
+            .expect("must build");
+        let mut src = bytes::Bytes::copy_from_slice(&pkt.body);
+
+        let _entity_id = src.get_i32();
+        let _is_hardcore = src.get_u8();
+        let _game_mode = src.get_u8();
+        let _prev = src.get_i8();
+        let dim_count = VarInt::decode(&mut src).unwrap().0;
+        for _ in 0..dim_count {
+            let _ = String::decode(&mut src).unwrap();
+        }
+        // registry_codec NBT — must self-frame to exactly its own bytes.
+        let _nbt = Nbt::decode(&mut src).expect("registry codec must decode");
+        let _dim_type = String::decode(&mut src).expect("dimension_type");
+        let _dim_name = String::decode(&mut src).expect("dimension_name");
+        let _seed = src.get_i64();
+        let _max = VarInt::decode(&mut src).unwrap();
+        let _view = VarInt::decode(&mut src).unwrap();
+        let _sim = VarInt::decode(&mut src).unwrap();
+        let _rdi = src.get_u8();
+        let _ers = src.get_u8();
+        let _dbg = src.get_u8();
+        let _flat = src.get_u8();
+        let _has_death = src.get_u8();
+        assert_eq!(
+            src.remaining(),
+            0,
+            "JoinGame body not fully consumed — {} bytes left (client desyncs here)",
+            src.remaining()
+        );
     }
 }
