@@ -438,6 +438,15 @@ impl ProxyState {
         let plugin_manager = if config.plugins.enabled {
             let mut manager = PluginManager::new().context("Failed to create plugin manager")?;
 
+            // Pin the manager to this long-lived runtime explicitly. `Proxy::new`
+            // runs inside the main runtime, so `Handle::current()` is the handle
+            // that outlives every plugin. Native plugins anchor the tasks they
+            // spawn (HTTP pollers, Redis pubsub bridges, timers) to it. Without
+            // this, a hot-reload that drives the reload under a throwaway
+            // current-thread runtime would hand plugins a handle that dies with
+            // that runtime, orphaning their tasks. See `set_runtime_handle`.
+            manager.set_runtime_handle(tokio::runtime::Handle::current());
+
             // Set allowed permissions from config
             for (plugin_name, perm_strings) in &config.plugin_permissions {
                 let permissions: Vec<kojacoord_plugin_system::api::PluginPermission> = perm_strings

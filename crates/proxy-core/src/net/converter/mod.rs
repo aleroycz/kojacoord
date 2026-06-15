@@ -150,6 +150,30 @@ impl PacketConverter {
                 (ProtocolVersion::V1_7_10, ProtocolVersion::V1_8) => {
                     v1_7_to_v1_8::convert_s2c(payload)
                 },
+                (ProtocolVersion::V1_7_10, sv) if sv.id() > ProtocolVersion::V1_8.id() => {
+                    match v1_7_to_v1_8::convert_s2c(payload) {
+                        ConversionResult::Passthrough => ConversionResult::Passthrough,
+                        ConversionResult::Drop => ConversionResult::Drop,
+                        ConversionResult::InjectS2C(p) => ConversionResult::InjectS2C(p),
+                        ConversionResult::Converted(pkts) => {
+                            let mut out = Vec::new();
+                            for pkt in pkts {
+                                let result = v1_8_to_modern::convert_s2c(pkt.clone(), client_proto);
+                                match result {
+                                    ConversionResult::Converted(p2) => out.extend(p2),
+                                    ConversionResult::Passthrough => out.push(pkt),
+                                    ConversionResult::Drop => {},
+                                    ConversionResult::InjectS2C(_) => {},
+                                }
+                            }
+                            if out.is_empty() {
+                                ConversionResult::Drop
+                            } else {
+                                ConversionResult::Converted(out)
+                            }
+                        },
+                    }
+                },
                 (ProtocolVersion::V1_6_4, ProtocolVersion::V1_12_2) => {
                     v1_6_4_to_v1_12_2::convert_s2c(payload)
                 },

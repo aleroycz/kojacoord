@@ -148,6 +148,26 @@ pub struct PluginContext {
     /// across a dynamic-library boundary where thread-local storage (and thus
     /// the ambient runtime) is not shared. `None` for WASM plugins, which run
     /// inside the host's wasmtime store and never spawn their own tasks.
+    ///
+    /// Native plugins **must** drive all async work through this handle and
+    /// **must not** spawn a bare `std::thread` to run runtime-dependent code.
+    /// A raw OS thread does not inherit a reactor across the dylib boundary, so
+    /// constructing a `tokio::time::interval`, timeout, or any I/O resource on
+    /// it panics with *"there is no reactor running"* — and that panic on a
+    /// plugin-owned thread is outside the host's `catch_unwind` reach, so it can
+    /// take down the whole process. Spawn onto the handle instead:
+    ///
+    /// ```ignore
+    /// // in on_load: stash context.runtime_handle, then in on_enable:
+    /// let handle = self.runtime_handle.clone().expect("native plugins get a handle");
+    /// handle.spawn(async move {
+    ///     let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+    ///     loop { tick.tick().await; /* periodic work */ }
+    /// });
+    /// ```
+    ///
+    /// If a plugin genuinely needs its own thread, call `handle.enter()` to put
+    /// the runtime in scope before creating any timer or I/O resource.
     pub runtime_handle: Option<tokio::runtime::Handle>,
 }
 

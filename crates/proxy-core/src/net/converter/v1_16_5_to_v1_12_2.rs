@@ -38,17 +38,17 @@ const V16_S2C_HELD_ITEM_CHANGE: u8 = 0x3F;
 const V16_S2C_PLAYER_ABILITIES: u8 = 0x30;
 const V16_S2C_SET_EXPERIENCE: u8 = 0x48;
 const V16_S2C_BLOCK_CHANGE: u8 = 0x0B;
-const V16_S2C_MULTI_BLOCK_CHANGE: u8 = 0x3B;
+const V16_S2C_MULTI_BLOCK_CHANGE: u8 = 0x0F;
 const V16_S2C_SET_SLOT: u8 = 0x15;
 const V16_S2C_WINDOW_ITEMS: u8 = 0x13;
 const V16_S2C_ENTITY_EQUIPMENT: u8 = 0x47;
 const V16_S2C_CHUNK_DATA: u8 = 0x20;
 const V16_S2C_ENTITY_TELEPORT: u8 = 0x56;
-const V16_S2C_MOVE_ENTITY_POS: u8 = 0x27;
-const V16_S2C_MOVE_ENTITY_POS_ROT: u8 = 0x28;
-const V16_S2C_MOVE_ENTITY_ROT: u8 = 0x29;
-const V16_S2C_DESTROY_ENTITIES: u8 = 0x36;
-const V16_S2C_ENTITY_HEAD_LOOK: u8 = 0x3A;
+const V16_S2C_MOVE_ENTITY_POS: u8 = 0x28;
+const V16_S2C_MOVE_ENTITY_POS_ROT: u8 = 0x29;
+const V16_S2C_MOVE_ENTITY_ROT: u8 = 0x2A;
+const V16_S2C_DESTROY_ENTITIES: u8 = 0x37;
+const V16_S2C_ENTITY_HEAD_LOOK: u8 = 0x3B;
 const V16_S2C_ENTITY_VELOCITY: u8 = 0x46;
 
 const V12_S2C_KEEP_ALIVE: u8 = 0x1F;
@@ -144,16 +144,13 @@ pub fn convert_s2c(
         V16_S2C_ENTITY_VELOCITY => rebuild_with_id(V12_S2C_ENTITY_VELOCITY, &body),
 
         V16_S2C_BLOCK_CHANGE => {
-            // Convert BlockChange from modern to legacy format
-            // 1.16.5: i64 position (1.14 layout) + VarInt state
-            // 1.12.2: i64 position (1.8 layout) + VarInt block_state where block_state = (block_id << 4) | meta
-            let mut body_mut = BytesMut::from(body.as_ref());
-            if body_mut.remaining() < 8 {
+            let mut cur = body;
+            if cur.remaining() < 8 {
                 return ConversionResult::Passthrough;
             }
-            let packed_modern = body_mut.get_u64();
+            let packed_modern = cur.get_u64();
             let pos = decode_modern_position(packed_modern);
-            let modern_state = match VarInt::decode(&mut body_mut.clone().freeze()) {
+            let modern_state = match VarInt::decode(&mut cur) {
                 Ok(v) => v.0 as u32,
                 Err(_) => return ConversionResult::Passthrough,
             };
@@ -177,16 +174,13 @@ pub fn convert_s2c(
             rebuild_with_id(V12_S2C_BLOCK_CHANGE, &out.freeze())
         },
         V16_S2C_MULTI_BLOCK_CHANGE => {
-            // Convert MultiBlockChange from modern to legacy format
-            // 1.16.5: i32 chunk_x | i32 chunk_z | VarInt count | (VarInt long_offset, VarInt state)[] records
-            // 1.12.2: i32 chunk_x | i32 chunk_z | VarInt count | (i16 x, i16 y, i16 z, VarInt block_id, VarInt block_data)[] records
-            let mut body_mut = BytesMut::from(body.as_ref());
-            if body_mut.remaining() < 8 {
+            let mut cur = body;
+            if cur.remaining() < 8 {
                 return ConversionResult::Passthrough;
             }
-            let chunk_x = body_mut.get_i32();
-            let chunk_z = body_mut.get_i32();
-            let count = VarInt::decode(&mut body_mut.clone().freeze())
+            let chunk_x = cur.get_i32();
+            let chunk_z = cur.get_i32();
+            let count = VarInt::decode(&mut cur)
                 .map_err(|e| format!("decode count: {}", e))
                 .unwrap()
                 .0 as usize;
@@ -198,11 +192,11 @@ pub fn convert_s2c(
             VarInt(count as i32).encode(&mut out).unwrap();
 
             for _ in 0..count {
-                let long_offset = VarInt::decode(&mut body_mut.clone().freeze())
+                let long_offset = VarInt::decode(&mut cur)
                     .map_err(|e| format!("decode offset: {}", e))
                     .unwrap()
                     .0 as u64;
-                let state = VarInt::decode(&mut body_mut.clone().freeze())
+                let state = VarInt::decode(&mut cur)
                     .map_err(|e| format!("decode state: {}", e))
                     .unwrap()
                     .0 as u32;
@@ -262,28 +256,49 @@ pub fn convert_s2c(
             }
         },
         V16_S2C_SET_SLOT => {
-            // Convert SetSlot from modern to legacy format
-            let mut body_mut = BytesMut::from(body.as_ref());
-            match items::convert_set_slot_modern_to_legacy(&mut body_mut) {
-                Ok(()) => rebuild_with_id(V12_S2C_SET_SLOT, &body_mut.freeze()),
-                Err(e) => {
-                    tracing::warn!(error = %e, "v1_16_5_to_v1_12_2: SetSlot conversion failed, dropping packet");
-                    ConversionResult::Drop
+            let mut cur = body;
+            if cur.remaining() < 1 + 2 {
+                return ConversionResult::Passthrough;
+            }
+            let window_id = cur.get_u8();
+            let slot_idx = cur.get_i16();
+            let modern_slot = match Slot::decode(&mut cur) {
+                Ok(s) => s,
+                Err(_) => return ConversionResult::Passthrough,
+            };
+            let legacy_slot = items::modern_slot_to_legacy(&modern_slot);
+
+            let mut out = BytesMut::new();
+            out.put_u8(window_id);
+            out.put_i16(slot_idx);
+            match legacy_slot.0 {
+                None => out.put_u8(0),
+                Some(data) => {
+                    out.put_u8(1);
+                    out.put_i16(data.item_id);
+                    out.put_u8(data.count as u8);
+                    out.put_i16(data.damage);
+                    match &data.nbt {
+                        None => VarInt(0).encode(&mut out).unwrap(),
+                        Some(nbt) => {
+                            nbt.encode(&mut out).unwrap();
+                        },
+                    }
                 },
             }
+            rebuild_with_id(V12_S2C_SET_SLOT, &out.freeze())
         },
         V16_S2C_WINDOW_ITEMS => {
-            // Convert WindowItems from modern to legacy format
-            let mut body_mut = BytesMut::from(body.as_ref());
-            let window_id = body_mut.get_u8();
-            let count = VarInt::decode(&mut body_mut.clone().freeze())
+            let mut cur = body;
+            let window_id = cur.get_u8();
+            let count = VarInt::decode(&mut cur)
                 .map_err(|e| format!("decode count: {}", e))
                 .unwrap()
                 .0 as usize;
 
             let mut legacy_slots = Vec::new();
             for _ in 0..count {
-                let modern_slot = Slot::decode(&mut body_mut.clone().freeze())
+                let modern_slot = Slot::decode(&mut cur)
                     .map_err(|e| format!("decode slot: {}", e))
                     .unwrap();
                 legacy_slots.push(items::modern_slot_to_legacy(&modern_slot));
@@ -313,13 +328,18 @@ pub fn convert_s2c(
             rebuild_with_id(V12_S2C_WINDOW_ITEMS, &out.freeze())
         },
         V16_S2C_ENTITY_EQUIPMENT => {
-            // Convert EntityEquipment from modern to legacy format
-            let mut body_mut = BytesMut::from(body.as_ref());
-            let entity_id = body_mut.get_i32();
-            let slot = body_mut.get_u8();
+            let mut cur = body;
+            let entity_id = match VarInt::decode(&mut cur) {
+                Ok(v) => v.0,
+                Err(_) => return ConversionResult::Passthrough,
+            };
+            if cur.remaining() < 1 {
+                return ConversionResult::Passthrough;
+            }
+            let slot = cur.get_u8();
 
             // Read modern slot
-            let modern_slot = Slot::decode(&mut body_mut.clone().freeze())
+            let modern_slot = Slot::decode(&mut cur)
                 .map_err(|e| format!("decode slot: {}", e))
                 .unwrap();
 
@@ -335,7 +355,6 @@ pub fn convert_s2c(
 
             let legacy_slot = items::modern_slot_to_legacy(&modern_slot);
 
-            // Rebuild in legacy format
             let mut out = BytesMut::new();
             out.put_i32(entity_id);
             out.put_i16(legacy_slot_idx);

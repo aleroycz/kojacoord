@@ -483,6 +483,22 @@ impl LimboPackets for V1_19 {
         Some(EncodedPacket { id: pid, body })
     }
 
+    /// Set Default Spawn Position — needed from 1.19.3 (proto 761) to
+    /// close the "Loading terrain" screen. Ids per ViaVersion
+    /// `ClientboundPackets1_19_3` (0x4C) / `ClientboundPackets1_19_4`
+    /// (0x50). 1.17–1.19.2 (≤760) don't need it, so return None.
+    fn set_default_spawn(&self, proto: u32) -> Option<EncodedPacket> {
+        let id: u8 = match proto {
+            761 => 0x4c, // 1.19.3
+            762 => 0x50, // 1.19.4
+            _ => return None,
+        };
+        Some(EncodedPacket {
+            id,
+            body: super::default_spawn_body(),
+        })
+    }
+
     fn light_update(&self, proto: u32) -> Option<EncodedPacket> {
         // Standalone LightUpdate only for 1.17 / 1.17.1 (proto 755/756); 1.18+
         // folds light into the combined chunk packet. Id 0x25 per ViaVersion

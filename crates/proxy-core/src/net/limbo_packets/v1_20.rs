@@ -389,6 +389,27 @@ impl LimboPackets for V1_20 {
     /// assert!(pkt.is_some());
     /// assert_eq!(pkt.unwrap().id, 0x0d);
     /// ```
+    /// Set Default Spawn Position — required from 1.19.3 to dismiss the
+    /// "Loading terrain" screen (1.20/1.20.1/1.20.2 fall in the window
+    /// that has no GameEvent-13 yet). Ids per ViaVersion
+    /// `ClientboundPackets1_19_4` (0x50, shared by 1.20/1.20.1) /
+    /// `ClientboundPackets1_20_2` (0x52) / `ClientboundPackets1_20_3`
+    /// (0x54) / `ClientboundPackets1_21` (0x56). Harmless on 765+, which
+    /// also close via the chunk-wait GameEvent.
+    fn set_default_spawn(&self, proto: u32) -> Option<EncodedPacket> {
+        let id: u8 = match proto {
+            763 => 0x50, // 1.20 / 1.20.1
+            764 => 0x52, // 1.20.2
+            765 => 0x54, // 1.20.3 / 1.20.4
+            766 => 0x56, // 1.20.5 / 1.20.6
+            _ => return None,
+        };
+        Some(EncodedPacket {
+            id,
+            body: super::default_spawn_body(),
+        })
+    }
+
     fn chunk_batch_start(&self, proto: u32) -> Option<EncodedPacket> {
         // 1.20.2+ only; empty body.
         let id: u8 = match proto {

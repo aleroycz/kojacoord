@@ -245,6 +245,19 @@ pub(crate) fn light_update_body_1_17(sections: usize) -> BytesMut {
 /// // buf now contains a compound with a MOTION_BLOCKING long-array of 37 zeros
 /// assert!(buf.len() > 0);
 /// ```
+/// Body for `Set Default Spawn Position`: a packed `[Position]` long
+/// (world spawn at origin 0,0,0) followed by a `[Float]` angle (0.0).
+/// Position packing matches Mojang's `BlockPos.asLong`:
+/// `((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF)` —
+/// the origin packs to 0. The actual coordinate is irrelevant to limbo;
+/// the packet's presence is what dismisses the 1.19.3+ loading screen.
+pub(crate) fn default_spawn_body() -> BytesMut {
+    let mut body = BytesMut::new();
+    body.put_i64(0); // packed Position (0, 0, 0)
+    body.put_f32(0.0); // angle
+    body
+}
+
 fn put_motion_blocking_field(body: &mut BytesMut) {
     body.put_u8(0x0c); // TAG_Long_Array
     let name = b"MOTION_BLOCKING";
@@ -373,6 +386,28 @@ pub trait LimboPackets: Send + Sync {
     /// }
     /// ```
     fn set_center_chunk(&self, _proto: u32) -> Option<EncodedPacket> {
+        None
+    }
+
+    /// Builds a `Set Default Spawn Position` packet (world spawn at the
+    /// origin, angle 0).
+    ///
+    /// REQUIRED from 1.19.3 (proto 761) onward: at 1.19.3 Mojang's
+    /// `LevelLoadStatusManager` began gating the dismissal of the
+    /// "Loading terrain" (`ReceivingLevelScreen`) on having received a
+    /// default spawn position — sending only the chunk + player position
+    /// (which sufficed through 1.19.2) leaves 1.19.3–1.20.2 clients stuck
+    /// on the loading screen even though chunks and sounds arrive fine.
+    /// 1.20.3+ (proto 765+) close the screen via the GameEvent-13
+    /// "start waiting for level chunks" packet instead, so this is the
+    /// closing mechanism for the 761–764 window specifically. Mirrors
+    /// NanoLimbo `ClientConnection::spawnPlayer`, which emits
+    /// `PACKET_SPAWN_POSITION` for every client `>= V1_19_3`.
+    ///
+    /// Body: `[Position location][Float angle]`. Returns `None` for
+    /// versions that don't need it (pre-1.19.3, where the default impl
+    /// applies).
+    fn set_default_spawn(&self, _proto: u32) -> Option<EncodedPacket> {
         None
     }
 
@@ -634,6 +669,35 @@ mod chunk_tests {
         let _death = b.get_u8();
         let _portal = VarInt::decode(&mut b).unwrap();
         assert_eq!(b.remaining(), 0, "763 JoinGame not fully consumed");
+    }
+
+    /// Set Default Spawn Position must be emitted for 1.19.3+ (proto
+    /// 761+) — the packet that dismisses the "Loading terrain" screen —
+    /// with the per-proto ids from ViaVersion, and MUST be absent for
+    /// ≤1.19.2 (≤760), which don't need it. Body is a packed Position
+    /// long + Float angle = 12 bytes.
+    #[test]
+    fn set_default_spawn_present_from_1_19_3() {
+        use super::LimboPackets;
+        // ≤1.19.2: not needed.
+        assert!(v1_19::V1_19.set_default_spawn(759).is_none(), "1.19");
+        assert!(v1_19::V1_19.set_default_spawn(760).is_none(), "1.19.2");
+        // 1.19.3 / 1.19.4 (v1_19 bucket).
+        for (proto, id) in [(761u32, 0x4cu8), (762, 0x50)] {
+            let pkt = v1_19::V1_19
+                .set_default_spawn(proto)
+                .unwrap_or_else(|| panic!("proto {proto} must send spawn pos"));
+            assert_eq!(pkt.id, id, "proto {proto} spawn-pos id");
+            assert_eq!(pkt.body.len(), 12, "proto {proto} body = i64 + f32");
+        }
+        // 1.20 – 1.20.6 (v1_20 bucket).
+        for (proto, id) in [(763u32, 0x50u8), (764, 0x52), (765, 0x54), (766, 0x56)] {
+            let pkt = v1_20::V1_20
+                .set_default_spawn(proto)
+                .unwrap_or_else(|| panic!("proto {proto} must send spawn pos"));
+            assert_eq!(pkt.id, id, "proto {proto} spawn-pos id");
+            assert_eq!(pkt.body.len(), 12, "proto {proto} body");
+        }
     }
 
     #[test]

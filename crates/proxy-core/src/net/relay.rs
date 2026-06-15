@@ -31,7 +31,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::{
     chat_signing::{determine_signing_mode, strip_chat_signature},
     commands,
-    config_synthesis::{build_cfg_finish_packet, determine_synthesis_mode, SynthesisMode},
+    config_synthesis::{build_cfg_packets, determine_synthesis_mode, SynthesisMode},
     converter::{ConversionDirection, ConversionResult, PacketConverter},
     cookies_transfers::supports_cookies_transfers,
     error::ConnectionError,
@@ -724,6 +724,23 @@ impl PacketRelay {
                                     bytes = msg.data.len(),
                                     "server-selector: received modpack info"
                                 );
+                                // Hand the client's modpack report to plugins so
+                                // the orchestrator plugin can cache it per-player
+                                // and accept/reject backend connections against
+                                // each server's required modpack. Delivered as a
+                                // generic plugin message; the orchestrator plugin
+                                // parses the `kojacoord:modpack` payload.
+                                state_c2s
+                                    .plugin_manager
+                                    .read()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .broadcast_event(
+                                        &kojacoord_plugin_system::PluginEvent::PluginMessage {
+                                            uuid,
+                                            channel: msg.channel.clone(),
+                                            data: msg.data.clone(),
+                                        },
+                                    );
                                 continue;
                             }
 
@@ -884,15 +901,15 @@ impl PacketRelay {
                             },
                         }
                     } else {
-                        // Config synthesis: inject FinishConfiguration if needed
+                        // Config synthesis: inject RegistryData (766+) + FinishConfiguration
                         if synthesis_mode == SynthesisMode::ClientSide {
-                            // Check if this is a LoginAcknowledged packet (varies by protocol)
-                            // For 1.20.2+, LoginAcknowledged is packet 0x03
                             let canonical = ProtocolVersion::from_id(proto);
                             if pkt_id == 0x03 && canonical.has_configuration_phase() {
-                                tracing::trace!("Injecting synthetic FinishConfiguration packet");
-                                if let Ok(cfg_finish) = build_cfg_finish_packet(proto) {
-                                    let _ = inject_s2c_tx.send(cfg_finish.into());
+                                if let Ok(cfg_packets) = build_cfg_packets(proto) {
+                                    for pkt in cfg_packets {
+                                        tracing::trace!("Injecting synthetic config-phase packet ({} bytes)", pkt.len());
+                                        let _ = inject_s2c_tx.send(pkt.into());
+                                    }
                                 }
                             }
                         }

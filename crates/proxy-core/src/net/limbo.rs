@@ -313,6 +313,18 @@ impl<'a> LimboHandler<'a> {
         let wait_chunks = self.packets.start_wait_chunks_event(proto);
         self.send_built(wait_chunks).await?;
 
+        // Set Default Spawn Position. From 1.19.3 (proto 761) the client's
+        // LevelLoadStatusManager won't dismiss the "Loading terrain" screen
+        // until it has received a default spawn position — the chunk +
+        // player position that sufficed through 1.19.2 leaves 1.19.3-1.20.2
+        // clients stuck on the loading screen (sounds/music still play
+        // because those packets are independent). 1.20.3+ close via the
+        // GameEvent-13 above instead. Mirrors NanoLimbo, which emits
+        // SPAWN_POSITION for every client >= 1.19.3.
+        tracing::debug!(player = %username, "Sending Set Default Spawn Position");
+        let spawn_pos = self.packets.set_default_spawn(proto);
+        self.send_built(spawn_pos).await?;
+
         tracing::debug!(player = %username, "Sending PlayerPosition packet");
         self.send_player_position(teleport_id).await?;
 
@@ -503,7 +515,14 @@ impl<'a> LimboHandler<'a> {
         }
 
         // 2. Proxy → client: ClientboundFinishConfiguration.
-        let id_finish = crate::packet_ids::cb_config(proto, "ClientboundFinishConfiguration");
+        // Registry stores this clientbound packet as "FinishConfiguration"
+        // (NOT "ClientboundFinishConfiguration") — the wrong name resolved
+        // to 0xFF, so the limbo silently skipped FinishConfiguration and
+        // left every config-phase client (1.20.2+/proto 764+) stuck in the
+        // Configuration state. It then mis-decoded our Play packets (the
+        // "Index 41 out of bounds for length 9" client crash) and dropped.
+        // connection.rs uses the correct name; this site had drifted.
+        let id_finish = crate::packet_ids::cb_config(proto, "FinishConfiguration");
         if id_finish == 0xFF {
             tracing::warn!(
                 proto,
@@ -519,19 +538,37 @@ impl<'a> LimboHandler<'a> {
             .await?;
 
         // 3. Client → proxy: ServerboundAcknowledgeFinishConfiguration.
+        // After LoginAck the 1.20.2+ client streams its config-phase packets —
+        // ClientInformation (0x00) and the brand PluginMessage (0x01) — BEFORE
+        // sending AcknowledgeFinishConfiguration (0x02). Reading exactly one
+        // packet here grabbed the brand packet, warned, and left the real Ack
+        // dangling for the limbo loop to drain. Instead, drain config packets
+        // until the Ack actually arrives (bounded, so a misbehaving client
+        // can't spin us forever).
         let expected_ack = crate::packet_ids::sb_config(proto, "AcknowledgeFinishConfiguration");
-        let raw = crate::packet_io::read_packet(&mut *self.stream, threshold).await?;
-        let mut cursor = raw;
-        let pkt_id = VarInt::decode(&mut cursor)
-            .map_err(ConnectionError::Protocol)?
-            .0 as u8;
-        if pkt_id != expected_ack {
-            tracing::warn!(
+        const MAX_CONFIG_PACKETS: usize = 8;
+        for _ in 0..MAX_CONFIG_PACKETS {
+            let raw = crate::packet_io::read_packet(&mut *self.stream, threshold).await?;
+            let mut cursor = raw;
+            let pkt_id = VarInt::decode(&mut cursor)
+                .map_err(ConnectionError::Protocol)?
+                .0 as u8;
+            if pkt_id == expected_ack {
+                return Ok(());
+            }
+            // Pre-Ack config packets (ClientInformation, brand PluginMessage)
+            // are expected and harmless; drain and keep waiting for the Ack.
+            tracing::debug!(
                 pkt_id,
                 expected = expected_ack,
-                "limbo config phase: expected AcknowledgeFinishConfiguration, got something else"
+                "limbo config phase: draining pre-Ack config packet"
             );
         }
+        tracing::warn!(
+            expected = expected_ack,
+            max = MAX_CONFIG_PACKETS,
+            "limbo config phase: AcknowledgeFinishConfiguration not received within limit"
+        );
         Ok(())
     }
 

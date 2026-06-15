@@ -172,21 +172,26 @@ fn c2s_login_ack_swallow(client_proto: u32) -> ConversionResult {
     // modern client out of the configuration phase that the client transitions
     // into immediately after sending LoginAck — otherwise the client stalls
     // waiting for Registry Data + Finish Configuration packets that will never
-    // come. We inject a synthetic Finish Configuration back toward the client.
+    // come.
     //
-    // Per registry: configuration-state clientbound FinishConfiguration was
-    // `0x02` for proto 764/765 (1.20.2-1.20.4) and shifted to `0x03` at
-    // proto 766 (1.20.5/1.20.6) when Cookie Request was inserted at 0x00.
-    // The V1_20_4 canonical bucket covers protos 763-766, so we must
-    // dispatch — using the wrong id for a 1.20.5/1.20.6 client leaves
-    // them stuck in configuration state.
-    //
-    // Source: <https://minecraft.wiki/w/Java_Edition_protocol/Packets>
-    // §Finish Configuration (clientbound) + crates/protocol/src/registry.rs
-    // CONFIGURATION table entries for proto 764 and 766.
-    let finish_id: u8 = if client_proto >= 766 { 0x03 } else { 0x02 };
-    let finish = build_payload(finish_id, &[]);
-    ConversionResult::InjectS2C(vec![finish])
+    // For 1.20.2–1.20.4 (proto 764–765) a bare FinishConfiguration suffices
+    // because the client keeps built-in defaults. For 1.20.5+ (proto 766+)
+    // the client clears its registries on entering config, so we must also
+    // inject ClientboundRegistryData packets before FinishConfiguration.
+    match crate::config_synthesis::build_cfg_packets(client_proto) {
+        Ok(packets) => {
+            if packets.is_empty() {
+                tracing::warn!(client_proto, "build_cfg_packets returned no packets");
+                ConversionResult::Drop
+            } else {
+                ConversionResult::InjectS2C(packets.into_iter().map(Bytes::from).collect())
+            }
+        },
+        Err(e) => {
+            tracing::warn!(client_proto, error = %e, "failed to build config-phase packets");
+            ConversionResult::Drop
+        },
+    }
 }
 
 // ============================================================================
@@ -278,11 +283,26 @@ mod tests {
         let payload = build_payload(V1204_LOGIN_C2S_LOGIN_ACK, &[]);
         match convert_c2s(payload, 765) {
             ConversionResult::InjectS2C(packets) => {
-                assert_eq!(packets.len(), 1, "exactly one synthetic packet");
-                // The injected packet is configuration-state s2c id 0x02
-                // (Finish Configuration) with empty body.
+                assert_eq!(packets.len(), 1, "proto 765: exactly one synthetic packet");
                 assert_eq!(packets[0].len(), 1, "id varint only, empty body");
                 assert_eq!(packets[0][0], 0x02);
+            },
+            other => panic!("expected InjectS2C, got {:?}", other_label(&other)),
+        }
+    }
+
+    #[test]
+    fn login_ack_766_injects_registry_data_then_finish() {
+        let payload = build_payload(V1204_LOGIN_C2S_LOGIN_ACK, &[]);
+        match convert_c2s(payload, 766) {
+            ConversionResult::InjectS2C(packets) => {
+                assert!(
+                    packets.len() > 1,
+                    "proto 766: expected RegistryData + FinishConfiguration, got {} packets",
+                    packets.len()
+                );
+                let last = &packets[packets.len() - 1];
+                assert_eq!(last[0], 0x03, "last packet should be FinishConfiguration (0x03)");
             },
             other => panic!("expected InjectS2C, got {:?}", other_label(&other)),
         }

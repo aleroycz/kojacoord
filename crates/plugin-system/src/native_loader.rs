@@ -115,11 +115,17 @@ impl PluginLoader {
         unsafe {
             let library = Library::new(path).context("Failed to load plugin library")?;
 
-            let get_metadata: Symbol<unsafe extern "C" fn() -> PluginMetadata> = library
+            // `C-unwind` (not plain `C`): if a plugin's entry point panics, the
+            // unwind crossing this boundary is defined behaviour that we can
+            // catch below, rather than UB that segfaults the proxy. A plugin
+            // built against the older `extern "C"` ABI that panics here is still
+            // UB on its side — but a correctly-built one is now contained.
+            let get_metadata: Symbol<unsafe extern "C-unwind" fn() -> PluginMetadata> = library
                 .get(b"get_metadata")
                 .context("Missing get_metadata symbol")?;
 
-            let metadata = get_metadata();
+            let metadata = crate::guard_plugin_call("get_metadata", || get_metadata())
+                .context("plugin get_metadata panicked")?;
 
             if !Self::check_version_compatibility(&metadata.min_proxy_version) {
                 return Err(anyhow::anyhow!(
@@ -129,11 +135,12 @@ impl PluginLoader {
                 ));
             }
 
-            let create_plugin: Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> = library
+            let create_plugin: Symbol<unsafe extern "C-unwind" fn() -> *mut dyn Plugin> = library
                 .get(b"create_plugin")
                 .context("Missing create_plugin symbol")?;
 
-            let plugin_ptr = create_plugin();
+            let plugin_ptr = crate::guard_plugin_call("create_plugin", || create_plugin())
+                .context("plugin create_plugin panicked")?;
             if plugin_ptr.is_null() {
                 return Err(anyhow::anyhow!("create_plugin returned a null pointer"));
             }
@@ -141,7 +148,9 @@ impl PluginLoader {
             // on_load / on_enable / register_packet_hooks / handle_event).
             let mut plugin: Box<dyn Plugin> = Box::from_raw(plugin_ptr);
 
-            plugin.on_load(context)?;
+            crate::guard_plugin_call("on_load", || plugin.on_load(context))
+                .and_then(|r| r)
+                .context("plugin on_load failed")?;
 
             self.libraries.push((metadata.name.clone(), library));
 

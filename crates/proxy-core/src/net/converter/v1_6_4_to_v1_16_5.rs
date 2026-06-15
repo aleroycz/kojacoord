@@ -1,6 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use kojacoord_protocol::codec::{Decode, Encode};
 use kojacoord_protocol::types::VarInt;
+use kojacoord_protocol::{encode_modern_position, BlockFlatteningTable};
 
 use super::helpers::rebuild_with_id;
 use super::items;
@@ -179,12 +180,17 @@ fn s2c_spawn_player(mut body: Bytes) -> ConversionResult {
         return ConversionResult::Passthrough;
     }
 
-    let x = body.get_i32() as f64;
-    let y = body.get_i32() as f64;
-    let z = body.get_i32() as f64;
+    let x_fixed = body.get_i32();
+    let y_fixed = body.get_i32();
+    let z_fixed = body.get_i32();
     let yaw = body.get_i8();
     let pitch = body.get_i8();
-    let current_item = body.get_i16();
+    let _current_item = body.get_i16();
+
+    // 1.6.4 fixed-point (1/32) → absolute double
+    let x = x_fixed as f64 / 32.0;
+    let y = y_fixed as f64 / 32.0;
+    let z = z_fixed as f64 / 32.0;
 
     let player_uuid = uuid::Uuid::new_v4();
 
@@ -200,23 +206,31 @@ fn s2c_spawn_player(mut body: Bytes) -> ConversionResult {
     out.put_f64(z);
     out.put_u8(yaw as u8);
     out.put_u8(pitch as u8);
-    VarInt(current_item as i32).encode(&mut out).unwrap();
 
+    // 1.16.5 SpawnPlayer has no currentItem or trailing metadata byte.
+    // Metadata begins with a proper DataWatcher terminator (0xFF) but
+    // we emit the terminator byte directly as 1.16.5 expects metadata entries.
     out.put_u8(0xFF);
 
     ConversionResult::Converted(vec![build_payload(V165_S2C_SPAWN_PLAYER, &out)])
 }
 
 fn s2c_entity_teleport(mut body: Bytes) -> ConversionResult {
+    // 1.6.4: i32 entity_id, i32 x (fixed-point 1/32), i32 y, i32 z, i8 yaw, i8 pitch
+    // 1.16.5: VarInt entity_id, f64 x, f64 y, f64 z, u8 yaw, u8 pitch, bool on_ground
     if body.remaining() < 18 {
         return ConversionResult::Passthrough;
     }
     let entity_id = body.get_i32();
-    let x = body.get_i32() as f64;
-    let y = body.get_i32() as f64;
-    let z = body.get_i32() as f64;
+    let x_fixed = body.get_i32();
+    let y_fixed = body.get_i32();
+    let z_fixed = body.get_i32();
     let yaw = body.get_i8();
     let pitch = body.get_i8();
+
+    let x = x_fixed as f64 / 32.0;
+    let y = y_fixed as f64 / 32.0;
+    let z = z_fixed as f64 / 32.0;
 
     let mut out = BytesMut::with_capacity(18);
     VarInt(entity_id).encode(&mut out).unwrap();
@@ -230,6 +244,9 @@ fn s2c_entity_teleport(mut body: Bytes) -> ConversionResult {
 }
 
 fn s2c_entity_rel_move(mut body: Bytes) -> ConversionResult {
+    // 1.6.4: i32 entity_id, i8 dx/dy/dz (units of 1/32 block)
+    // 1.16.5: VarInt entity_id, i16 dx/dy/dz (units of 1/4096 block), bool on_ground
+    // 1/32 to 1/4096 = multiply by 128
     if body.remaining() < 7 {
         return ConversionResult::Passthrough;
     }
@@ -238,25 +255,33 @@ fn s2c_entity_rel_move(mut body: Bytes) -> ConversionResult {
     let dy = body.get_i8();
     let dz = body.get_i8();
 
+    let dx_16 = (dx as i16 * 128).clamp(i16::MIN, i16::MAX);
+    let dy_16 = (dy as i16 * 128).clamp(i16::MIN, i16::MAX);
+    let dz_16 = (dz as i16 * 128).clamp(i16::MIN, i16::MAX);
+
     let mut out = BytesMut::with_capacity(8);
     VarInt(entity_id).encode(&mut out).unwrap();
-    out.put_i16(dx as i16);
-    out.put_i16(dy as i16);
-    out.put_i16(dz as i16);
+    out.put_i16(dx_16);
+    out.put_i16(dy_16);
+    out.put_i16(dz_16);
     out.put_u8(0);
     ConversionResult::Converted(vec![build_payload(V165_S2C_ENTITY_REL_MOVE, &out)])
 }
 
 fn s2c_entity(mut body: Bytes) -> ConversionResult {
-    if body.remaining() < 4 + 1 + 4 + 4 + 4 + 1 + 1 + 1 + 2 + 2 + 2 {
+    // 1.6.4 SpawnObject: i32 entity_id, i8 entity_type, i32 x/y/z (fixed-point 1/32),
+    //   i8 yaw/pitch/head_pitch, i16 velocity_x/y/z
+    // 1.16.5 SpawnEntity: VarInt entity_id, UUID, VarInt entity_type, f64 x/y/z,
+    //   u8 yaw/pitch/head_pitch, i16 velocity_x/y/z
+    if body.remaining() < 4 + 1 + 12 + 3 + 6 {
         return ConversionResult::Passthrough;
     }
 
     let entity_id = body.get_i32();
-    let entity_type = body.get_i8() as i32;
-    let x = body.get_i32() as f64;
-    let y = body.get_i32() as f64;
-    let z = body.get_i32() as f64;
+    let _entity_type_raw = body.get_i8();
+    let x_fixed = body.get_i32();
+    let y_fixed = body.get_i32();
+    let z_fixed = body.get_i32();
     let yaw = body.get_i8();
     let pitch = body.get_i8();
     let head_pitch = body.get_i8();
@@ -264,8 +289,21 @@ fn s2c_entity(mut body: Bytes) -> ConversionResult {
     let velocity_y = body.get_i16();
     let velocity_z = body.get_i16();
 
+    let x = x_fixed as f64 / 32.0;
+    let y = y_fixed as f64 / 32.0;
+    let z = z_fixed as f64 / 32.0;
+
+    let entity_uuid = uuid::Uuid::new_v4();
+    // Entity type is NOT directly mappable between 1.6.4 and 1.16.5 registries.
+    // Best-effort: pass the raw value as VarInt. Some entities will be wrong
+    // but dropping the packet entirely is worse (no objects spawn at all).
+    let entity_type = _entity_type_raw as i32;
+
     let mut out = BytesMut::new();
     VarInt(entity_id).encode(&mut out).unwrap();
+    let (hi, lo) = entity_uuid.as_u64_pair();
+    out.put_i64(hi as i64);
+    out.put_i64(lo as i64);
     VarInt(entity_type).encode(&mut out).unwrap();
     out.put_f64(x);
     out.put_f64(y);
@@ -277,27 +315,37 @@ fn s2c_entity(mut body: Bytes) -> ConversionResult {
     out.put_i16(velocity_y);
     out.put_i16(velocity_z);
 
-    out.put_u8(0xFF);
-
     ConversionResult::Converted(vec![build_payload(V165_S2C_ENTITY, &out)])
 }
 
 fn s2c_block_change(mut body: Bytes) -> ConversionResult {
+    // 1.6.4: i32 x, i8 y, i32 z, i32 block_id, i8 metadata
+    // 1.16.5: i64 packed Position (1.14 layout), VarInt flattened block state
     if body.remaining() < 11 {
         return ConversionResult::Passthrough;
     }
     let x = body.get_i32();
-    let y = body.get_i8();
+    let y = body.get_i8() as i32;
     let z = body.get_i32();
-    let block_id = body.get_i32();
-    let metadata = body.get_i8();
+    let block_id = body.get_i32() as u32;
+    let metadata = body.get_i8() as u32;
 
-    let mut out = BytesMut::with_capacity(11);
-    VarInt(x).encode(&mut out).unwrap();
-    out.put_u8(y as u8);
-    VarInt(z).encode(&mut out).unwrap();
-    VarInt(block_id).encode(&mut out).unwrap();
-    out.put_u8(metadata as u8);
+    let legacy_state = (block_id << 4) | (metadata & 0xF);
+    let flattening = BlockFlatteningTable::new();
+    let modern_state = match flattening.legacy_to_modern(legacy_state) {
+        Some(s) => s,
+        None => {
+            tracing::warn!(legacy_state, "v1_6_4_to_v1_16_5: No mapping for legacy block state, dropping BlockChange");
+            return ConversionResult::Drop;
+        },
+    };
+
+    let pos = kojacoord_protocol::types::Position { x, y, z };
+    let packed = encode_modern_position(pos);
+
+    let mut out = BytesMut::with_capacity(12);
+    out.put_i64(packed);
+    VarInt(modern_state as i32).encode(&mut out).unwrap();
     ConversionResult::Converted(vec![build_payload(V165_S2C_BLOCK_CHANGE, &out)])
 }
 
@@ -592,12 +640,13 @@ pub fn convert_c2s(payload: Bytes) -> ConversionResult {
 }
 
 fn c2s_keep_alive(mut body: Bytes) -> ConversionResult {
+    // 1.6.4: i32 id. 1.16.5: i64 id.
     if body.remaining() < 4 {
         return ConversionResult::Passthrough;
     }
     let id = body.get_i32();
     let mut out = BytesMut::with_capacity(8);
-    VarInt(id).encode(&mut out).unwrap();
+    out.put_i64(id as i64);
     ConversionResult::Converted(vec![build_payload(V165_C2S_KEEP_ALIVE, &out)])
 }
 
@@ -657,54 +706,54 @@ fn c2s_player_pos_look(mut body: Bytes) -> ConversionResult {
 }
 
 fn c2s_player_digging(mut body: Bytes) -> ConversionResult {
+    // 1.6.4: i8 status, i32 x, i8 y, i32 z, i8 face
+    // 1.16.5: VarInt status, Position (1.14 packed i64), VarInt face
     if body.remaining() < 11 {
         return ConversionResult::Passthrough;
     }
-
     let status = body.get_i8();
     let x = body.get_i32();
-    let y = body.get_i8();
+    let y = body.get_i8() as i32;
     let z = body.get_i32();
     let face = body.get_i8();
 
+    let pos = kojacoord_protocol::types::Position { x, y, z };
+    let packed = encode_modern_position(pos);
+
     let mut out = BytesMut::new();
     VarInt(status as i32).encode(&mut out).unwrap();
-
-    out.put_i64(x as i64);
-    out.put_i64(y as i64);
-    out.put_i64(z as i64);
-
+    out.put_i64(packed);
     VarInt(face as i32).encode(&mut out).unwrap();
 
     ConversionResult::Converted(vec![build_payload(V165_C2S_PLAYER_DIGGING, &out)])
 }
 
 fn c2s_player_block_placement(mut body: Bytes) -> ConversionResult {
-    if body.remaining() < 16 {
+    // 1.6.4: i32 x, i8 y, i32 z, i8 direction, i16 held_item, i8 cx/cy/cz
+    // 1.16.5: VarInt hand, Position (1.14 packed), VarInt face, f32 cx/cy/cz, bool inside_block
+    if body.remaining() < 10 {
         return ConversionResult::Passthrough;
     }
-
     let x = body.get_i32();
-    let y = body.get_i8();
+    let y = body.get_i8() as i32;
     let z = body.get_i32();
     let direction = body.get_i8();
-    let held_item = body.get_i16();
-    let cursor_x = body.get_i8();
-    let cursor_y = body.get_i8();
-    let cursor_z = body.get_i8();
+    let _held_item = body.get_i16();
+    let cx = body.get_i8();
+    let cy = body.get_i8();
+    let cz = body.get_i8();
+
+    let pos = kojacoord_protocol::types::Position { x, y, z };
+    let packed = encode_modern_position(pos);
 
     let mut out = BytesMut::new();
-
-    out.put_i64(x as i64);
-    out.put_i64(y as i64);
-    out.put_i64(z as i64);
-
+    VarInt(0).encode(&mut out).unwrap(); // hand = main_hand
+    out.put_i64(packed);
     VarInt(direction as i32).encode(&mut out).unwrap();
-    VarInt(0).encode(&mut out).unwrap();
-    out.put_i16(held_item);
-    out.put_i8(cursor_x);
-    out.put_i8(cursor_y);
-    out.put_i8(cursor_z);
+    out.put_f32(cx as f32 / 16.0);
+    out.put_f32(cy as f32 / 16.0);
+    out.put_f32(cz as f32 / 16.0);
+    out.put_u8(0); // inside_block = false
 
     ConversionResult::Converted(vec![build_payload(V165_C2S_PLAYER_BLOCK_PLACEMENT, &out)])
 }

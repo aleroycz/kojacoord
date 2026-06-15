@@ -23,9 +23,7 @@
 //! client, TARGET is 1.6.4 server.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use kojacoord_protocol::codec::Decode;
-#[cfg(test)]
-use kojacoord_protocol::codec::Encode;
+use kojacoord_protocol::codec::{Decode, Encode};
 use kojacoord_protocol::types::VarInt;
 
 use super::{build_payload, split_id};
@@ -34,78 +32,91 @@ use crate::converter::ConversionResult;
 // ---- 1.12.2 source ids (per registry proto 340 / BungeeCord
 // `Protocol.java::TO_SERVER`) ----
 const V112_C2S_TELEPORT_CONFIRM: u8 = 0x00;
+const V112_C2S_TAB_COMPLETE: u8 = 0x01;
 const V112_C2S_CHAT: u8 = 0x02;
 const V112_C2S_CLIENT_STATUS: u8 = 0x03;
 const V112_C2S_CLIENT_SETTINGS: u8 = 0x04;
+const V112_C2S_CONFIRM_TRANSACTION: u8 = 0x05;
+const V112_C2S_ENCHANT_ITEM: u8 = 0x06;
+const V112_C2S_WINDOW_CLICK: u8 = 0x07;
 const V112_C2S_CLOSE_WINDOW: u8 = 0x08;
 const V112_C2S_PLUGIN_MESSAGE: u8 = 0x09;
 const V112_C2S_USE_ENTITY: u8 = 0x0A;
 const V112_C2S_KEEP_ALIVE: u8 = 0x0B;
 const V112_C2S_MOVE_PLAYER_POS: u8 = 0x0C;
+const V112_C2S_PLAYER_POS: u8 = 0x0D;
 const V112_C2S_PLAYER_POS_LOOK: u8 = 0x0E;
 const V112_C2S_MOVE_PLAYER_ROT: u8 = 0x0F;
+const V112_C2S_STEER_VEHICLE: u8 = 0x16;
 const V112_C2S_PLAYER_ABILITIES: u8 = 0x13;
 const V112_C2S_PLAYER_DIGGING: u8 = 0x14;
 const V112_C2S_ENTITY_ACTION: u8 = 0x15;
 const V112_C2S_HELD_ITEM_CHANGE: u8 = 0x1A;
+const V112_C2S_CREATIVE_INV: u8 = 0x1B;
 const V112_C2S_UPDATE_SIGN: u8 = 0x1C;
 const V112_C2S_ANIMATION: u8 = 0x1D;
 const V112_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x1F;
 const V112_C2S_USE_ITEM: u8 = 0x20;
 
-// ---- 1.6.4 target ids (MCP-doc, decimal = hex) ----
-const V164_C2S_KEEP_ALIVE: u8 = 0x00; // Packet0KeepAlive
-const V164_C2S_CHAT: u8 = 0x03; // Packet3Chat
-const V164_C2S_USE_ENTITY: u8 = 0x07; // Packet7UseEntity
-/// Pre-netty c2s "still alive" packet. Not currently produced by our
-/// modern→pre-netty converter (modern clients don't emit a bare
-/// on-ground update either), but kept as documentation of the
-/// authentic 1.6.4 packet table per HexaCord.
+// ---- 1.6.4 target ids (MCP-doc decimal = hex) ----
+const V164_C2S_KEEP_ALIVE: u8 = 0x00;
+const V164_C2S_CHAT: u8 = 0x03;
+const V164_C2S_USE_ENTITY: u8 = 0x07;
 #[allow(dead_code)]
-const V164_C2S_PLAYER_ON_GROUND: u8 = 0x0A; // Packet10Flying
-const V164_C2S_MOVE_PLAYER_POS: u8 = 0x0B; // Packet11PlayerPosition
-const V164_C2S_MOVE_PLAYER_ROT: u8 = 0x0C; // Packet12PlayerLook
-const V164_C2S_PLAYER_POS_LOOK: u8 = 0x0D; // Packet13PlayerLookMove
-const V164_C2S_PLAYER_DIGGING: u8 = 0x0E; // Packet14BlockDig
-const V164_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x0F; // Packet15Place
-const V164_C2S_HELD_ITEM_CHANGE: u8 = 0x10; // Packet16BlockItemSwitch
-const V164_C2S_ANIMATION: u8 = 0x12; // Packet18Animation
-const V164_C2S_ENTITY_ACTION: u8 = 0x13; // Packet19EntityAction
-const V164_C2S_CLIENT_COMMAND: u8 = 0x16; // Packet22ClientCommand (respawn)
-const V164_C2S_CLOSE_WINDOW: u8 = 0x65; // Packet101CloseWindow
-const V164_C2S_UPDATE_SIGN: u8 = 0x82; // Packet130UpdateSign
-const V164_C2S_PLAYER_ABILITIES: u8 = 0xCA; // PacketCAPlayerAbilities
-const V164_C2S_CLIENT_SETTINGS: u8 = 0xCC; // PacketCCSettings
-const V164_C2S_PLUGIN_MESSAGE: u8 = 0xFA; // PacketFAPluginMessage
+const V164_C2S_PLAYER_ON_GROUND: u8 = 0x0A;
+const V164_C2S_MOVE_PLAYER_POS: u8 = 0x0B;
+const V164_C2S_MOVE_PLAYER_ROT: u8 = 0x0C;
+const V164_C2S_PLAYER_POS_LOOK: u8 = 0x0D;
+const V164_C2S_PLAYER_DIGGING: u8 = 0x0E;
+const V164_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x0F;
+const V164_C2S_HELD_ITEM_CHANGE: u8 = 0x10;
+const V164_C2S_ANIMATION: u8 = 0x12;
+const V164_C2S_ENTITY_ACTION: u8 = 0x13;
+const V164_C2S_STEER_VEHICLE: u8 = 0x1B;
+const V164_C2S_CLOSE_WINDOW: u8 = 0x65;
+const V164_C2S_WINDOW_CLICK: u8 = 0x66;
+const V164_C2S_CONFIRM_TRANSACTION: u8 = 0x6A;
+const V164_C2S_CREATIVE_INV: u8 = 0x6B;
+const V164_C2S_ENCHANT_ITEM: u8 = 0x6C;
+const V164_C2S_UPDATE_SIGN: u8 = 0x82;
+const V164_C2S_PLAYER_ABILITIES: u8 = 0xCA;
+const V164_C2S_TAB_COMPLETE: u8 = 0xCB;
+const V164_C2S_CLIENT_SETTINGS: u8 = 0xCC;
+const V164_C2S_CLIENT_COMMAND: u8 = 0xCD;
+const V164_C2S_PLUGIN_MESSAGE: u8 = 0xFA;
 
 pub fn convert_c2s(payload: Bytes) -> ConversionResult {
     let Some((id, body)) = split_id(payload.clone()) else {
         return ConversionResult::Passthrough;
     };
     match id {
-        // TeleportConfirm: 1.6.4 has no equivalent. Drop silently.
         V112_C2S_TELEPORT_CONFIRM => ConversionResult::Drop,
+        V112_C2S_TAB_COMPLETE => c2s_tab_complete(body),
         V112_C2S_KEEP_ALIVE => c2s_keep_alive(body),
         V112_C2S_CHAT => c2s_chat(body),
         V112_C2S_CLIENT_STATUS => c2s_client_status(body),
         V112_C2S_CLIENT_SETTINGS => c2s_client_settings(body),
+        V112_C2S_CONFIRM_TRANSACTION => c2s_confirm_transaction(body),
+        V112_C2S_ENCHANT_ITEM => c2s_enchant_item(body),
+        V112_C2S_WINDOW_CLICK => c2s_window_click(body),
         V112_C2S_CLOSE_WINDOW => c2s_close_window(body),
         V112_C2S_PLUGIN_MESSAGE => c2s_plugin_message(body),
         V112_C2S_USE_ENTITY => c2s_use_entity(body),
         V112_C2S_MOVE_PLAYER_POS => c2s_move_player_pos(body),
         V112_C2S_PLAYER_POS_LOOK => c2s_player_pos_look(body),
         V112_C2S_MOVE_PLAYER_ROT => c2s_move_player_rot(body),
+        V112_C2S_STEER_VEHICLE => c2s_steer_vehicle(body),
         V112_C2S_PLAYER_ABILITIES => c2s_player_abilities(body),
         V112_C2S_PLAYER_DIGGING => c2s_player_digging(body),
         V112_C2S_ENTITY_ACTION => c2s_entity_action(body),
         V112_C2S_HELD_ITEM_CHANGE => c2s_held_item_change(body),
+        V112_C2S_CREATIVE_INV => c2s_creative_inv(body),
         V112_C2S_UPDATE_SIGN => c2s_update_sign(body),
         V112_C2S_ANIMATION => c2s_animation(body),
         V112_C2S_PLAYER_BLOCK_PLACEMENT => c2s_player_block_placement(body),
-        // UseItem: 1.12.2 split block-place from item-use. 1.6.4 has no
-        // separate UseItem packet; the block-placement packet covered
-        // right-click-air via face=-1. Drop the standalone form.
         V112_C2S_USE_ITEM => ConversionResult::Drop,
+        // 1.12.2 packets with no 1.6.4 C2S equivalent
+        0x10 | 0x11 | 0x12 | 0x17 | 0x18 | 0x19 | 0x1E => ConversionResult::Drop,
         _ => ConversionResult::Passthrough,
     }
 }
@@ -507,30 +518,64 @@ fn c2s_player_block_placement(mut body: Bytes) -> ConversionResult {
 // would reject the unknown packet id and disconnect with "Bad packet id".
 
 // ---- 1.12.2 source ids (s2c, per BungeeCord proto 340) ----
+const V112_S2C_SPAWN_OBJECT: u8 = 0x00;
+const V112_S2C_SPAWN_EXP_ORB: u8 = 0x01;
+const V112_S2C_SPAWN_GLOBAL: u8 = 0x02;
+const V112_S2C_SPAWN_MOB: u8 = 0x03;
+const V112_S2C_SPAWN_PAINTING: u8 = 0x04;
 const V112_S2C_SPAWN_PLAYER: u8 = 0x05;
+const V112_S2C_ANIMATION: u8 = 0x06;
+const V112_S2C_STATISTICS: u8 = 0x07;
+const V112_S2C_BLOCK_BREAK_ANIM: u8 = 0x08;
+const V112_S2C_TILE_ENTITY_DATA: u8 = 0x09;
+const V112_S2C_BLOCK_ACTION: u8 = 0x0A;
 const V112_S2C_BLOCK_CHANGE: u8 = 0x0B;
+const V112_S2C_TAB_COMPLETE: u8 = 0x0E;
 const V112_S2C_CHAT: u8 = 0x0F;
+const V112_S2C_CONFIRM_TRANSACTION: u8 = 0x11;
+const V112_S2C_CLOSE_WINDOW: u8 = 0x12;
+const V112_S2C_OPEN_WINDOW: u8 = 0x13;
+const V112_S2C_WINDOW_ITEMS: u8 = 0x14;
+const V112_S2C_WINDOW_PROPERTY: u8 = 0x15;
+const V112_S2C_SET_SLOT: u8 = 0x16;
 const V112_S2C_PLUGIN_MESSAGE: u8 = 0x18;
+const V112_S2C_NAMED_SOUND: u8 = 0x19;
 const V112_S2C_DISCONNECT: u8 = 0x1A;
+const V112_S2C_ENTITY_STATUS: u8 = 0x1B;
+const V112_S2C_EXPLOSION: u8 = 0x1C;
+const V112_S2C_GAME_STATE: u8 = 0x1E;
 const V112_S2C_KEEP_ALIVE: u8 = 0x1F;
+const V112_S2C_EFFECT: u8 = 0x21;
+const V112_S2C_PARTICLE: u8 = 0x22;
 const V112_S2C_JOIN_GAME: u8 = 0x23;
 const V112_S2C_ENTITY: u8 = 0x25;
 const V112_S2C_ENTITY_REL_MOVE: u8 = 0x26;
 const V112_S2C_ENTITY_LOOK_REL_MOVE: u8 = 0x27;
 const V112_S2C_ENTITY_LOOK: u8 = 0x28;
+const V112_S2C_OPEN_SIGN_EDITOR: u8 = 0x2A;
 const V112_S2C_PLAYER_ABILITIES: u8 = 0x2C;
 const V112_S2C_PLAYER_POS_LOOK: u8 = 0x2F;
 const V112_S2C_DESTROY_ENTITIES: u8 = 0x32;
+const V112_S2C_REMOVE_ENTITY_EFFECT: u8 = 0x33;
 const V112_S2C_RESPAWN: u8 = 0x35;
 const V112_S2C_ENTITY_HEAD_LOOK: u8 = 0x36;
 const V112_S2C_HELD_ITEM_CHANGE: u8 = 0x3A;
+const V112_S2C_DISPLAY_SCOREBOARD: u8 = 0x3B;
+const V112_S2C_ENTITY_METADATA: u8 = 0x3C;
+const V112_S2C_ATTACH_ENTITY: u8 = 0x3D;
+const V112_S2C_ENTITY_VELOCITY: u8 = 0x3E;
 const V112_S2C_ENTITY_EQUIPMENT: u8 = 0x3F;
 const V112_S2C_SET_EXPERIENCE: u8 = 0x40;
 const V112_S2C_UPDATE_HEALTH: u8 = 0x41;
+const V112_S2C_SCOREBOARD_OBJ: u8 = 0x42;
+const V112_S2C_TEAMS: u8 = 0x44;
+const V112_S2C_UPDATE_SCORE: u8 = 0x45;
 const V112_S2C_SPAWN_POSITION: u8 = 0x46;
 const V112_S2C_TIME_UPDATE: u8 = 0x47;
 const V112_S2C_COLLECT_ITEM: u8 = 0x4B;
 const V112_S2C_ENTITY_TELEPORT: u8 = 0x4C;
+const V112_S2C_ENTITY_PROPERTIES: u8 = 0x4E;
+const V112_S2C_ENTITY_EFFECT: u8 = 0x4F;
 
 // ---- 1.6.4 target ids (s2c, MCP-doc decimal = hex) ----
 const V164_S2C_KEEP_ALIVE: u8 = 0x00;
@@ -543,8 +588,14 @@ const V164_S2C_UPDATE_HEALTH: u8 = 0x08;
 const V164_S2C_RESPAWN: u8 = 0x09;
 const V164_S2C_PLAYER_POS_LOOK: u8 = 0x0D;
 const V164_S2C_HELD_ITEM_CHANGE: u8 = 0x10;
+const V164_S2C_ANIMATION: u8 = 0x12;
 const V164_S2C_SPAWN_PLAYER: u8 = 0x14;
 const V164_S2C_COLLECT_ITEM: u8 = 0x16;
+const V164_S2C_SPAWN_OBJECT: u8 = 0x17;
+const V164_S2C_SPAWN_MOB: u8 = 0x18;
+const V164_S2C_SPAWN_PAINTING: u8 = 0x19;
+const V164_S2C_SPAWN_EXP_ORB: u8 = 0x1A;
+const V164_S2C_ENTITY_VELOCITY: u8 = 0x1C;
 const V164_S2C_DESTROY_ENTITIES: u8 = 0x1D;
 const V164_S2C_ENTITY: u8 = 0x1E;
 const V164_S2C_ENTITY_REL_MOVE: u8 = 0x1F;
@@ -552,9 +603,39 @@ const V164_S2C_ENTITY_LOOK: u8 = 0x20;
 const V164_S2C_ENTITY_LOOK_REL_MOVE: u8 = 0x21;
 const V164_S2C_ENTITY_TELEPORT: u8 = 0x22;
 const V164_S2C_ENTITY_HEAD_LOOK: u8 = 0x23;
-const V164_S2C_BLOCK_CHANGE: u8 = 0x35;
+const V164_S2C_ENTITY_STATUS: u8 = 0x26;
+const V164_S2C_ATTACH_ENTITY: u8 = 0x27;
+const V164_S2C_ENTITY_METADATA: u8 = 0x28;
+const V164_S2C_ENTITY_EFFECT: u8 = 0x29;
+const V164_S2C_REMOVE_ENTITY_EFFECT: u8 = 0x2A;
 const V164_S2C_SET_EXPERIENCE: u8 = 0x2B;
+const V164_S2C_ENTITY_PROPERTIES: u8 = 0x2C;
+const V164_S2C_BLOCK_CHANGE: u8 = 0x35;
+const V164_S2C_BLOCK_ACTION: u8 = 0x36;
+const V164_S2C_BLOCK_BREAK_ANIM: u8 = 0x37;
+const V164_S2C_EXPLOSION: u8 = 0x3C;
+const V164_S2C_EFFECT: u8 = 0x3D;
+const V164_S2C_NAMED_SOUND: u8 = 0x3E;
+const V164_S2C_PARTICLE: u8 = 0x3F;
+const V164_S2C_GAME_STATE: u8 = 0x46;
+const V164_S2C_SPAWN_GLOBAL: u8 = 0x47;
+const V164_S2C_OPEN_WINDOW: u8 = 0x64;
+const V164_S2C_CLOSE_WINDOW: u8 = 0x65;
+const V164_S2C_SET_SLOT: u8 = 0x67;
+const V164_S2C_WINDOW_ITEMS: u8 = 0x68;
+const V164_S2C_WINDOW_PROPERTY: u8 = 0x69;
+const V164_S2C_CONFIRM_TRANSACTION: u8 = 0x6A;
+const V164_S2C_UPDATE_SIGN: u8 = 0x82;
+const V164_S2C_TILE_ENTITY_DATA: u8 = 0x84;
+const V164_S2C_OPEN_SIGN_EDITOR: u8 = 0x85;
+const V164_S2C_STATISTIC: u8 = 0xC8;
+const V164_S2C_PLAYER_INFO: u8 = 0xC9;
 const V164_S2C_PLAYER_ABILITIES: u8 = 0xCA;
+const V164_S2C_TAB_COMPLETE: u8 = 0xCB;
+const V164_S2C_SCOREBOARD_OBJ: u8 = 0xCE;
+const V164_S2C_UPDATE_SCORE: u8 = 0xCF;
+const V164_S2C_DISPLAY_SCOREBOARD: u8 = 0xD0;
+const V164_S2C_TEAMS: u8 = 0xD1;
 const V164_S2C_PLUGIN_MESSAGE: u8 = 0xFA;
 const V164_S2C_DISCONNECT: u8 = 0xFF;
 
@@ -577,20 +658,57 @@ pub fn convert_s2c(payload: Bytes) -> ConversionResult {
         V112_S2C_PLUGIN_MESSAGE => s2c_plugin_message(body),
         V112_S2C_BLOCK_CHANGE => s2c_block_change(body),
         V112_S2C_SPAWN_PLAYER => s2c_spawn_player(body),
+        V112_S2C_SPAWN_OBJECT => s2c_spawn_object(body),
+        V112_S2C_SPAWN_MOB => s2c_spawn_mob(body),
+        V112_S2C_SPAWN_PAINTING => s2c_spawn_painting(body),
+        V112_S2C_SPAWN_EXP_ORB => s2c_spawn_exp_orb(body),
+        V112_S2C_SPAWN_GLOBAL => s2c_spawn_global(body),
         V112_S2C_ENTITY => s2c_entity(body),
         V112_S2C_ENTITY_REL_MOVE => s2c_entity_rel_move(body),
         V112_S2C_ENTITY_LOOK => s2c_entity_look(body),
         V112_S2C_ENTITY_LOOK_REL_MOVE => s2c_entity_look_rel_move(body),
         V112_S2C_ENTITY_TELEPORT => s2c_entity_teleport(body),
         V112_S2C_ENTITY_HEAD_LOOK => s2c_entity_head_look(body),
+        V112_S2C_ENTITY_STATUS => s2c_entity_status(body),
+        V112_S2C_ATTACH_ENTITY => s2c_attach_entity(body),
+        V112_S2C_ENTITY_METADATA => s2c_entity_metadata(body),
+        V112_S2C_ENTITY_EFFECT => s2c_entity_effect(body),
+        V112_S2C_REMOVE_ENTITY_EFFECT => s2c_remove_entity_effect(body),
+        V112_S2C_SET_EXPERIENCE => s2c_set_experience(body),
+        V112_S2C_ENTITY_PROPERTIES => s2c_entity_properties(body),
         V112_S2C_DESTROY_ENTITIES => s2c_destroy_entities(body),
         V112_S2C_COLLECT_ITEM => s2c_collect_item(body),
         V112_S2C_ENTITY_EQUIPMENT => s2c_entity_equipment(body),
-        V112_S2C_SET_EXPERIENCE => s2c_set_experience(body),
+        V112_S2C_ENTITY_VELOCITY => s2c_entity_velocity(body),
+        V112_S2C_ANIMATION => s2c_animation(body),
+        V112_S2C_BLOCK_BREAK_ANIM => s2c_block_break_anim(body),
+        V112_S2C_BLOCK_ACTION => s2c_block_action(body),
+        V112_S2C_TILE_ENTITY_DATA => s2c_tile_entity_data(body),
+        V112_S2C_OPEN_WINDOW => s2c_open_window(body),
+        V112_S2C_CLOSE_WINDOW => s2c_close_window(body),
+        V112_S2C_SET_SLOT => s2c_set_slot(body),
+        V112_S2C_WINDOW_ITEMS => s2c_window_items(body),
+        V112_S2C_WINDOW_PROPERTY => s2c_window_property(body),
+        V112_S2C_CONFIRM_TRANSACTION => s2c_confirm_transaction(body),
+        V112_S2C_OPEN_SIGN_EDITOR => s2c_open_sign_editor(body),
+        V112_S2C_STATISTICS => s2c_statistics(body),
+        V112_S2C_TAB_COMPLETE => s2c_tab_complete(body),
+        V112_S2C_SCOREBOARD_OBJ => s2c_scoreboard_obj(body),
+        V112_S2C_UPDATE_SCORE => s2c_update_score(body),
+        V112_S2C_DISPLAY_SCOREBOARD => s2c_display_scoreboard(body),
+        V112_S2C_TEAMS => s2c_teams(body),
+        V112_S2C_EFFECT => s2c_effect(body),
+        V112_S2C_NAMED_SOUND => s2c_named_sound(body),
+        V112_S2C_EXPLOSION => s2c_explosion(body),
+        V112_S2C_GAME_STATE => s2c_game_state(body),
+        V112_S2C_PARTICLE => {
+            tracing::debug!(target: "converter", "1.12.2→1.6.4: particle dropped (string→id mapping needed)");
+            ConversionResult::Drop
+        },
         // Drop post-1.6 additions that have no pre-netty equivalent.
-        // The 1.6.4 client would disconnect on the unknown id.
-        0x07 | 0x17 | 0x1B | 0x1D | 0x29 | 0x2B | 0x2D | 0x2E | 0x31 | 0x33 | 0x34 | 0x37
-        | 0x38 | 0x39 | 0x3D | 0x42 | 0x43 | 0x44 | 0x45 | 0x48 | 0x4A | 0x4D | 0x4E | 0x4F => {
+        0x0C | 0x0D | 0x17 | 0x1D | 0x29 | 0x2B | 0x2D | 0x30
+        | 0x31 | 0x34 | 0x37 | 0x38 | 0x39 | 0x43 | 0x48 | 0x49
+        | 0x4A | 0x4D => {
             ConversionResult::Drop
         },
         _ => ConversionResult::Passthrough,
@@ -1087,6 +1205,658 @@ fn encode_legacy_string(s: &str, dst: &mut BytesMut) {
     for u in units {
         dst.put_u16(u);
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// New S2C converters (1.12.2 → 1.6.4)
+// ──────────────────────────────────────────────────────────────────────────
+
+fn s2c_spawn_object(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; u8 type; f64 x/y/z; i8 pitch/yaw; i32 objectData; [i16 vx/vy/vz]
+    // 1.6.4: i32 eid; i8 type; i32 x_fp32/y_fp32/z_fp32; i8 pitch/yaw; i32 objectData; [i16 vx/vy/vz]
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(typ) = r.u8() else { return ConversionResult::Passthrough; };
+    let Some(x) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(y) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(z) = r.f64() else { return ConversionResult::Passthrough; };
+    let yaw = r.u8().unwrap_or(0);
+    let pitch = r.u8().unwrap_or(0);
+    let Some(data) = r.i32() else { return ConversionResult::Passthrough; };
+
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_u8(typ);
+    out.put_i32((x * 32.0).round() as i32);
+    out.put_i32((y * 32.0).round() as i32);
+    out.put_i32((z * 32.0).round() as i32);
+    out.put_u8(yaw);
+    out.put_u8(pitch);
+    out.put_i32(data);
+    if data != 0 {
+        if r.remaining() >= 6 {
+            out.put_i16(r.i16().unwrap_or(0));
+            out.put_i16(r.i16().unwrap_or(0));
+            out.put_i16(r.i16().unwrap_or(0));
+        }
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SPAWN_OBJECT, &out)])
+}
+
+fn s2c_spawn_exp_orb(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; f64 x/y/z; i16 count
+    // 1.6.4: i32 eid; i32 x_fp32/y_fp32/z_fp32; i16 count
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(x) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(y) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(z) = r.f64() else { return ConversionResult::Passthrough; };
+    let count = r.i16().unwrap_or(0);
+
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_i32((x * 32.0).round() as i32);
+    out.put_i32((y * 32.0).round() as i32);
+    out.put_i32((z * 32.0).round() as i32);
+    out.put_i16(count);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SPAWN_EXP_ORB, &out)])
+}
+
+fn s2c_spawn_global(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; i8 type; i32 x/y/z
+    // 1.6.4: i32 eid; i8 type; i32 x/y/z
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(typ) = r.i8() else { return ConversionResult::Passthrough; };
+    let Some(x) = r.i32() else { return ConversionResult::Passthrough; };
+    let Some(y) = r.i32() else { return ConversionResult::Passthrough; };
+    let Some(z) = r.i32() else { return ConversionResult::Passthrough; };
+
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_i8(typ);
+    out.put_i32(x);
+    out.put_i32(y);
+    out.put_i32(z);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SPAWN_GLOBAL, &out)])
+}
+
+fn s2c_spawn_mob(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; u8 type; f64 x/y/z; i8 yaw/pitch/headPitch; i16 vx/vy/vz; metadata
+    // 1.6.4: i32 eid; u8 type; i32 x_fp32/y_fp32/z_fp32; i8 yaw/pitch/headPitch; i16 vx/vy/vz; metadata
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(typ) = r.u8() else { return ConversionResult::Passthrough; };
+    let Some(x) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(y) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(z) = r.f64() else { return ConversionResult::Passthrough; };
+    let yaw = r.u8().unwrap_or(0);
+    let pitch = r.u8().unwrap_or(0);
+    let head_pitch = r.u8().unwrap_or(0);
+    let vx = r.i16().unwrap_or(0);
+    let vy = r.i16().unwrap_or(0);
+    let vz = r.i16().unwrap_or(0);
+
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_u8(typ);
+    out.put_i32((x * 32.0).round() as i32);
+    out.put_i32((y * 32.0).round() as i32);
+    out.put_i32((z * 32.0).round() as i32);
+    out.put_u8(yaw);
+    out.put_u8(pitch);
+    out.put_u8(head_pitch);
+    out.put_i16(vx);
+    out.put_i16(vy);
+    out.put_i16(vz);
+    out.put_u8(0x7F); // metadata terminator
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SPAWN_MOB, &out)])
+}
+
+fn s2c_spawn_painting(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; string title; Position packed; u8 direction
+    // 1.6.4: i32 eid; UCS-2 title; i32 x; i32 y; i32 z; i32 direction
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(title) = r.string() else { return ConversionResult::Passthrough; };
+    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let direction = r.u8().unwrap_or(0);
+    let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
+
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    encode_legacy_string(&title, &mut out);
+    out.put_i32(pos.x);
+    out.put_i32(pos.y);
+    out.put_i32(pos.z);
+    out.put_i32(direction as i32);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SPAWN_PAINTING, &out)])
+}
+
+fn s2c_animation(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; u8 animation
+    // 1.6.4: i32 eid; u8 animation
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(anim) = r.u8() else { return ConversionResult::Passthrough; };
+
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_u8(anim);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ANIMATION, &out)])
+}
+
+fn s2c_statistics(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt count; (string name, VarInt value)[]
+    // 1.6.4: i32 count; (UCS-2 name, i32 value)[]
+    let mut r = super::safe::Reader::new(body);
+    let Some(count) = r.varint() else { return ConversionResult::Passthrough; };
+    let mut out = BytesMut::new();
+    out.put_i32(count);
+    for _ in 0..count {
+        let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+        let Some(value) = r.varint() else { return ConversionResult::Passthrough; };
+        encode_legacy_string(&name, &mut out);
+        out.put_i32(value);
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_STATISTIC, &out)])
+}
+
+fn s2c_block_break_anim(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; Position; i8 destroyStage
+    // 1.6.4: i32 eid; i32 x; i32 y; i32 z; i8 destroyStage
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let stage = r.i8().unwrap_or(0);
+    let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
+
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_i32(pos.x);
+    out.put_i32(pos.y);
+    out.put_i32(pos.z);
+    out.put_i8(stage);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_BLOCK_BREAK_ANIM, &out)])
+}
+
+fn s2c_tile_entity_data(body: Bytes) -> ConversionResult {
+    // 1.12.2: Position; u8 action; NBT data
+    // 1.6.4: i32 x; i16 y; i32 z; u8 action; NBT data
+    let mut r = super::safe::Reader::new(body);
+    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let Some(action) = r.u8() else { return ConversionResult::Passthrough; };
+    let nbt_rest = r.rest();
+    let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
+
+    let mut out = BytesMut::new();
+    out.put_i32(pos.x);
+    out.put_i16(pos.y as i16);
+    out.put_i32(pos.z);
+    out.put_u8(action);
+    out.extend_from_slice(&nbt_rest);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_TILE_ENTITY_DATA, &out)])
+}
+
+fn s2c_block_action(body: Bytes) -> ConversionResult {
+    // 1.12.2: Position; u8 byte1; u8 byte2; VarInt blockId
+    // 1.6.4: i32 x; i16 y; i32 z; u8 byte1; u8 byte2; i16 blockId
+    let mut r = super::safe::Reader::new(body);
+    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let byte1 = r.u8().unwrap_or(0);
+    let byte2 = r.u8().unwrap_or(0);
+    let block_id = r.varint().unwrap_or(0);
+    let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
+
+    let mut out = BytesMut::new();
+    out.put_i32(pos.x);
+    out.put_i16(pos.y as i16);
+    out.put_i32(pos.z);
+    out.put_u8(byte1);
+    out.put_u8(byte2);
+    out.put_i16(block_id as i16);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_BLOCK_ACTION, &out)])
+}
+
+fn s2c_open_window(body: Bytes) -> ConversionResult {
+    // 1.12.2: u8 windowId; string inventoryType; string windowTitle; u8 slotCount; [i32 entityId]
+    // 1.6.4: u8 windowId; u8 inventoryType; UCS-2 windowTitle; u8 slotCount; [u8 useProvidedTitle; i32 entityId]
+    let mut r = super::safe::Reader::new(body);
+    let Some(wid) = r.u8() else { return ConversionResult::Passthrough; };
+    let Some(inv_type_str) = r.string() else { return ConversionResult::Passthrough; };
+    let Some(title) = r.string() else { return ConversionResult::Passthrough; };
+    let slot_count = r.u8().unwrap_or(0);
+    let inv_type_id: u8 = match inv_type_str.as_str() {
+        "minecraft:chest" => 0,
+        "minecraft:crafting_table" => 1,
+        "minecraft:furnace" => 2,
+        "minecraft:dispenser" => 3,
+        "minecraft:enchanting_table" => 4,
+        "minecraft:brewing_stand" => 5,
+        "minecraft:villager" => 6,
+        "minecraft:beacon" => 7,
+        "minecraft:anvil" => 8,
+        "minecraft:hopper" => 9,
+        "minecraft:dropper" => 10,
+        "EntityHorse" => 11,
+        _ => 0,
+    };
+
+    let mut out = BytesMut::new();
+    out.put_u8(wid);
+    out.put_u8(inv_type_id);
+    encode_legacy_string(&title, &mut out);
+    out.put_u8(slot_count);
+    if inv_type_id == 11 {
+        out.put_u8(1); // useProvidedTitle = true
+        let eid = r.i32().unwrap_or(0);
+        out.put_i32(eid);
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_OPEN_WINDOW, &out)])
+}
+
+fn s2c_close_window(body: Bytes) -> ConversionResult {
+    // 1.12.2: u8 windowId. 1.6.4: u8 windowId.
+    if body.remaining() < 1 {
+        return ConversionResult::Passthrough;
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_CLOSE_WINDOW, &body)])
+}
+
+fn s2c_set_slot(body: Bytes) -> ConversionResult {
+    // 1.12.2: i8 windowId; i16 slot; Slot
+    // 1.6.4: i8 windowId; i16 slot; Slot (legacy format)
+    // Slot format differs — we forward the header and emit an empty slot to avoid garbage.
+    let mut r = super::safe::Reader::new(body);
+    let Some(wid) = r.i8() else { return ConversionResult::Passthrough; };
+    let Some(slot) = r.i16() else { return ConversionResult::Passthrough; };
+
+    let mut out = BytesMut::new();
+    out.put_i8(wid);
+    out.put_i16(slot);
+    out.put_i16(-1); // empty slot marker
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SET_SLOT, &out)])
+}
+
+fn s2c_window_items(body: Bytes) -> ConversionResult {
+    // 1.12.2: u8 windowId; i16 count; Slot[]
+    // 1.6.4: u8 windowId; i16 count; Slot[] (legacy format)
+    // Slot format differs structurally — emit empty slots to avoid garbage.
+    let mut r = super::safe::Reader::new(body);
+    let Some(wid) = r.u8() else { return ConversionResult::Passthrough; };
+    let Some(count) = r.i16() else { return ConversionResult::Passthrough; };
+
+    let mut out = BytesMut::new();
+    out.put_u8(wid);
+    out.put_i16(count);
+    for _ in 0..count {
+        out.put_i16(-1); // empty slot
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_WINDOW_ITEMS, &out)])
+}
+
+fn s2c_window_property(body: Bytes) -> ConversionResult {
+    // 1.12.2: u8 windowId; i16 property; i16 value
+    // 1.6.4: u8 windowId; i16 property; i16 value
+    if body.remaining() < 5 {
+        return ConversionResult::Passthrough;
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_WINDOW_PROPERTY, &body)])
+}
+
+fn s2c_confirm_transaction(body: Bytes) -> ConversionResult {
+    // 1.12.2: i8 windowId; i16 action; bool accepted
+    // 1.6.4: i8 windowId; i16 action; bool accepted
+    if body.remaining() < 4 {
+        return ConversionResult::Passthrough;
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_CONFIRM_TRANSACTION, &body)])
+}
+
+fn s2c_open_sign_editor(body: Bytes) -> ConversionResult {
+    // 1.12.2: Position. 1.6.4: i32 x; i32 y; i32 z
+    let mut r = super::safe::Reader::new(body);
+    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
+    let mut out = BytesMut::new();
+    out.put_i32(pos.x);
+    out.put_i32(pos.y);
+    out.put_i32(pos.z);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_OPEN_SIGN_EDITOR, &out)])
+}
+
+fn s2c_tab_complete(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt count; string[]
+    // 1.6.4: UCS-2 string (NUL-separated)
+    let mut r = super::safe::Reader::new(body);
+    let Some(count) = r.varint() else { return ConversionResult::Passthrough; };
+    let mut parts: Vec<String> = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let Some(s) = r.string() else { return ConversionResult::Passthrough; };
+        parts.push(s);
+    }
+    let joined = parts.join("\0");
+    let mut out = BytesMut::new();
+    encode_legacy_string(&joined, &mut out);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_TAB_COMPLETE, &out)])
+}
+
+fn s2c_scoreboard_obj(body: Bytes) -> ConversionResult {
+    // 1.12.2: string name; i8 mode; [string displayName; string type]
+    // 1.6.4: UCS-2 name; i8 mode; [UCS-2 displayName; UCS-2 type]
+    let mut r = super::safe::Reader::new(body);
+    let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+    let mode = r.u8().unwrap_or(0);
+    let mut out = BytesMut::new();
+    encode_legacy_string(&name, &mut out);
+    out.put_u8(mode);
+    if mode == 0 || mode == 2 {
+        let Some(display) = r.string() else { return ConversionResult::Passthrough; };
+        let rest_type = r.string().unwrap_or_else(|| "integer".to_owned());
+        encode_legacy_string(&display, &mut out);
+        encode_legacy_string(&rest_type, &mut out);
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_SCOREBOARD_OBJ, &out)])
+}
+
+fn s2c_update_score(body: Bytes) -> ConversionResult {
+    // 1.12.2: string name; i8 action; string objective; VarInt value
+    // 1.6.4: UCS-2 name; i8 action; UCS-2 objective; i32 value
+    let mut r = super::safe::Reader::new(body);
+    let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+    let action = r.u8().unwrap_or(0);
+    let Some(obj) = r.string() else { return ConversionResult::Passthrough; };
+    let value = r.varint().unwrap_or(0);
+    let mut out = BytesMut::new();
+    encode_legacy_string(&name, &mut out);
+    out.put_u8(action);
+    encode_legacy_string(&obj, &mut out);
+    out.put_i32(value);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_UPDATE_SCORE, &out)])
+}
+
+fn s2c_display_scoreboard(body: Bytes) -> ConversionResult {
+    // 1.12.2: i8 slot; string name
+    // 1.6.4: i8 slot; UCS-2 name
+    let mut r = super::safe::Reader::new(body);
+    let slot = r.i8().unwrap_or(0);
+    let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+    let mut out = BytesMut::new();
+    out.put_i8(slot);
+    encode_legacy_string(&name, &mut out);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_DISPLAY_SCOREBOARD, &out)])
+}
+
+fn s2c_teams(body: Bytes) -> ConversionResult {
+    // 1.12.2: string name; i8 mode; [string displayName; string prefix; string suffix; i8 flags; string nameTagVisibility; string collisionRule; i8 color]
+    // 1.6.4: UCS-2 name; i8 mode; [UCS-2 displayName; UCS-2 prefix; UCS-2 suffix; i8 flags; i8 color; i8 friendlyFire]
+    // Team format is complex and version-dependent — best-effort passthrough.
+    let mut r = super::safe::Reader::new(body);
+    let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+    let mode = r.u8().unwrap_or(0);
+    let mut out = BytesMut::new();
+    encode_legacy_string(&name, &mut out);
+    out.put_u8(mode);
+    if mode == 0 || mode == 2 {
+        let display = r.string().unwrap_or_default();
+        let prefix = r.string().unwrap_or_default();
+        let suffix = r.string().unwrap_or_default();
+        let flags = r.u8().unwrap_or(0);
+        r.string(); // nameTagVisibility — skip
+        r.string(); // collisionRule — skip
+        let color = r.u8().unwrap_or(0);
+        encode_legacy_string(&display, &mut out);
+        encode_legacy_string(&prefix, &mut out);
+        encode_legacy_string(&suffix, &mut out);
+        out.put_u8(flags);
+        out.put_u8(color);
+        out.put_u8(flags); // friendlyFire (reuse flags byte)
+    }
+    if mode == 0 || mode == 3 || mode == 4 {
+        let count = r.varint().unwrap_or(0);
+        VarInt(count).encode(&mut out).unwrap();
+        for _ in 0..count {
+            let entry = r.string().unwrap_or_default();
+            encode_legacy_string(&entry, &mut out);
+        }
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_TEAMS, &out)])
+}
+
+fn s2c_entity_status(body: Bytes) -> ConversionResult {
+    // 1.12.2: i32 eid; i8 status. 1.6.4: i32 eid; i8 status.
+    if body.remaining() < 5 { return ConversionResult::Passthrough; }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_STATUS, &body)])
+}
+
+fn s2c_attach_entity(body: Bytes) -> ConversionResult {
+    // 1.12.2: i32 eid; i32 vehicleId; bool leash
+    // 1.6.4: i32 eid; i32 vehicleId; bool leash
+    if body.remaining() < 9 { return ConversionResult::Passthrough; }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ATTACH_ENTITY, &body)])
+}
+
+fn s2c_entity_metadata(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; metadata. 1.6.4: i32 eid; metadata.
+    // Metadata format is incompatible — stub terminator.
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_u8(0x7F); // metadata terminator
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_METADATA, &out)])
+}
+
+fn s2c_entity_effect(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; i8 effectId; i8 amplifier; VarInt duration; bool hideParticles
+    // 1.6.4: i32 eid; i8 effectId; i8 amplifier; i16 duration
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let effect_id = r.i8().unwrap_or(0);
+    let amplifier = r.i8().unwrap_or(0);
+    let duration = r.varint().unwrap_or(0);
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_i8(effect_id);
+    out.put_i8(amplifier);
+    out.put_i16(duration.clamp(0, i16::MAX as i32) as i16);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_EFFECT, &out)])
+}
+
+fn s2c_remove_entity_effect(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; i8 effectId. 1.6.4: i32 eid; i8 effectId.
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let effect_id = r.i8().unwrap_or(0);
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_i8(effect_id);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_REMOVE_ENTITY_EFFECT, &out)])
+}
+
+fn s2c_entity_properties(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; i32 count; (string key; f64 value; VarInt modCount; (UUID f64 i8)[])[]
+    // 1.6.4: i32 eid; i32 count; (string key; f64 value; i16 modCount; (UUID f64 i8)[])[]
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(prop_count) = r.i32() else { return ConversionResult::Passthrough; };
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_i32(prop_count);
+    for _ in 0..prop_count {
+        let Some(key) = r.string() else { return ConversionResult::Passthrough; };
+        let Some(value) = r.f64() else { return ConversionResult::Passthrough; };
+        let mod_count = r.varint().unwrap_or(0);
+        key.encode(&mut out).unwrap();
+        out.put_f64(value);
+        out.put_i16(mod_count.clamp(0, i16::MAX as i32) as i16);
+        for _ in 0..mod_count {
+            let msb = r.i64().unwrap_or(0);
+            let lsb = r.i64().unwrap_or(0);
+            let amount = r.f64().unwrap_or(0.0);
+            let op = r.i8().unwrap_or(0);
+            out.put_i64(msb);
+            out.put_i64(lsb);
+            out.put_f64(amount);
+            out.put_i8(op);
+        }
+    }
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_PROPERTIES, &out)])
+}
+
+fn s2c_entity_velocity(body: Bytes) -> ConversionResult {
+    // 1.12.2: VarInt eid; i16 vx/vy/vz. 1.6.4: i32 eid; i16 vx/vy/vz.
+    let mut r = super::safe::Reader::new(body);
+    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let vx = r.i16().unwrap_or(0);
+    let vy = r.i16().unwrap_or(0);
+    let vz = r.i16().unwrap_or(0);
+    let mut out = BytesMut::new();
+    out.put_i32(eid);
+    out.put_i16(vx);
+    out.put_i16(vy);
+    out.put_i16(vz);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_VELOCITY, &out)])
+}
+
+fn s2c_effect(body: Bytes) -> ConversionResult {
+    // 1.12.2: i32 effectId; Position; i32 data; bool global
+    // 1.6.4: i32 effectId; i32 x; i32 y; i32 z; i32 data; bool global
+    let mut r = super::safe::Reader::new(body);
+    let Some(effect_id) = r.i32() else { return ConversionResult::Passthrough; };
+    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let data = r.i32().unwrap_or(0);
+    let global = r.u8().unwrap_or(0);
+    let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
+
+    let mut out = BytesMut::new();
+    out.put_i32(effect_id);
+    out.put_i32(pos.x);
+    out.put_i32(pos.y);
+    out.put_i32(pos.z);
+    out.put_i32(data);
+    out.put_u8(global);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_EFFECT, &out)])
+}
+
+fn s2c_named_sound(_body: Bytes) -> ConversionResult {
+    // 1.12.2 and 1.6.4 have very different named sound formats.
+    // Dropping rather than risking malformed output.
+    tracing::debug!(target: "converter", "1.12.2→1.6.4: named sound effect dropped (format differs)");
+    ConversionResult::Drop
+}
+
+fn s2c_explosion(body: Bytes) -> ConversionResult {
+    // 1.12.2: f32 x/y/z; f32 radius; VarInt count; (i8,i8,i8)[]; f32 motionX/Y/Z
+    // 1.6.4: f32 x/y/z; f32 radius; i32 count; (i8,i8,i8)[]; f32 motionX/Y/Z
+    // Very similar — only count type differs (VarInt vs i32).
+    let mut r = super::safe::Reader::new(body);
+    let Some(x) = r.f32() else { return ConversionResult::Passthrough; };
+    let Some(y) = r.f32() else { return ConversionResult::Passthrough; };
+    let Some(z) = r.f32() else { return ConversionResult::Passthrough; };
+    let Some(radius) = r.f32() else { return ConversionResult::Passthrough; };
+    let Some(count) = r.varint() else { return ConversionResult::Passthrough; };
+    let mut out = BytesMut::new();
+    out.put_f32(x);
+    out.put_f32(y);
+    out.put_f32(z);
+    out.put_f32(radius);
+    out.put_i32(count);
+    for _ in 0..count {
+        let dx = r.i8().unwrap_or(0);
+        let dy = r.i8().unwrap_or(0);
+        let dz = r.i8().unwrap_or(0);
+        out.put_i8(dx);
+        out.put_i8(dy);
+        out.put_i8(dz);
+    }
+    let mx = r.f32().unwrap_or(0.0);
+    let my = r.f32().unwrap_or(0.0);
+    let mz = r.f32().unwrap_or(0.0);
+    out.put_f32(mx);
+    out.put_f32(my);
+    out.put_f32(mz);
+    ConversionResult::Converted(vec![build_payload(V164_S2C_EXPLOSION, &out)])
+}
+
+fn s2c_game_state(body: Bytes) -> ConversionResult {
+    // 1.12.2: u8 reason; f32 value. 1.6.4: i8 reason; f32 value.
+    if body.remaining() < 5 { return ConversionResult::Passthrough; }
+    let out = BytesMut::from(body.as_ref());
+    ConversionResult::Converted(vec![build_payload(V164_S2C_GAME_STATE, &out)])
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// New C2S converters (1.12.2 → 1.6.4)
+// ──────────────────────────────────────────────────────────────────────────
+
+fn c2s_tab_complete(mut body: Bytes) -> ConversionResult {
+    // 1.12.2: string text; bool assumeCommand; [bool hasPos; Position]
+    // 1.6.4: UCS-2 text
+    let Ok(text) = String::decode(&mut body) else { return ConversionResult::Passthrough; };
+    let mut out = BytesMut::new();
+    encode_legacy_string(&text, &mut out);
+    ConversionResult::Converted(vec![build_payload(V164_C2S_TAB_COMPLETE, &out)])
+}
+
+fn c2s_confirm_transaction(body: Bytes) -> ConversionResult {
+    // 1.12.2: i8 windowId; i16 action; bool accepted. 1.6.4: same.
+    if body.remaining() < 4 { return ConversionResult::Passthrough; }
+    ConversionResult::Converted(vec![build_payload(V164_C2S_CONFIRM_TRANSACTION, &body)])
+}
+
+fn c2s_enchant_item(body: Bytes) -> ConversionResult {
+    // 1.12.2: i8 windowId; i8 enchantment. 1.6.4: same.
+    if body.remaining() < 2 { return ConversionResult::Passthrough; }
+    ConversionResult::Converted(vec![build_payload(V164_C2S_ENCHANT_ITEM, &body)])
+}
+
+fn c2s_window_click(body: Bytes) -> ConversionResult {
+    // 1.12.2: u8 windowId; i16 slot; u8 button; i16 action; VarInt mode; Slot
+    // 1.6.4: i8 windowId; i16 slot; i8 button; i16 action; i8 mode; Slot (legacy)
+    // Slot format differs structurally — we emit an empty slot.
+    let mut r = super::safe::Reader::new(body);
+    let Some(wid) = r.u8() else { return ConversionResult::Passthrough; };
+    let Some(slot) = r.i16() else { return ConversionResult::Passthrough; };
+    let button = r.u8().unwrap_or(0);
+    let action = r.i16().unwrap_or(0);
+    let mode = r.varint().unwrap_or(0);
+    let mut out = BytesMut::new();
+    out.put_i8(wid as i8);
+    out.put_i16(slot);
+    out.put_i8(button as i8);
+    out.put_i16(action);
+    out.put_i8(mode as i8);
+    out.put_i16(-1); // empty slot
+    ConversionResult::Converted(vec![build_payload(V164_C2S_WINDOW_CLICK, &out)])
+}
+
+fn c2s_creative_inv(body: Bytes) -> ConversionResult {
+    // 1.12.2: i16 slot; Slot. 1.6.4: i16 slot; Slot (legacy).
+    // Emit empty slot for safety.
+    let mut r = super::safe::Reader::new(body);
+    let Some(slot) = r.i16() else { return ConversionResult::Passthrough; };
+    let mut out = BytesMut::new();
+    out.put_i16(slot);
+    out.put_i16(-1); // empty slot
+    ConversionResult::Converted(vec![build_payload(V164_C2S_CREATIVE_INV, &out)])
+}
+
+fn c2s_steer_vehicle(mut body: Bytes) -> ConversionResult {
+    // 1.12.2: f32 sideways; f32 forward; u8 flags. 1.6.4: f32 sideways; f32 forward; bool jump; bool unmount.
+    if body.remaining() < 9 { return ConversionResult::Passthrough; }
+    let sideways = body.get_f32();
+    let forward = body.get_f32();
+    let flags = body.get_u8();
+    let jump = (flags & 0x02) != 0;
+    let unmount = (flags & 0x01) != 0;
+
+    let mut out = BytesMut::with_capacity(10);
+    out.put_f32(sideways);
+    out.put_f32(forward);
+    out.put_u8(jump as u8);
+    out.put_u8(unmount as u8);
+    ConversionResult::Converted(vec![build_payload(V164_C2S_STEER_VEHICLE, &out)])
 }
 
 #[cfg(test)]
