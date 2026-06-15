@@ -70,7 +70,7 @@ pub fn build_login_success(
             use kojacoord_protocol::versions::v1_8_x::login::ClientboundLoginSuccess;
             encode(proto, ClientboundLoginSuccess { uuid, username })
         },
-        CanonicalVersion::V1_12_2 => {
+        CanonicalVersion::V1_12_2 | CanonicalVersion::V1_15_2 => {
             use kojacoord_protocol::versions::v1_12_x::login::{
                 ClientboundLoginSuccess, ProfileProperty,
             };
@@ -91,7 +91,7 @@ pub fn build_login_success(
                 },
             )
         },
-        CanonicalVersion::V1_16_5 => {
+        CanonicalVersion::V1_16_5 | CanonicalVersion::V1_18_2 => {
             // LoginSuccess wire shape — three distinct era boundaries
             // inside this canonical bucket. Verified against
             // minecraft.wiki Java_Edition_protocol/Packets#Login_Success
@@ -316,7 +316,7 @@ pub fn build_encryption_request(
                 },
             )
         },
-        CanonicalVersion::V1_12_2 => {
+        CanonicalVersion::V1_12_2 | CanonicalVersion::V1_15_2 => {
             use kojacoord_protocol::versions::v1_12_x::login::ClientboundEncryptionRequest;
             encode(
                 proto,
@@ -327,7 +327,7 @@ pub fn build_encryption_request(
                 },
             )
         },
-        CanonicalVersion::V1_16_5 => {
+        CanonicalVersion::V1_16_5 | CanonicalVersion::V1_18_2 => {
             use kojacoord_protocol::versions::v1_16_x::login::ClientboundEncryptionRequest;
             encode(
                 proto,
@@ -409,7 +409,7 @@ pub fn build_set_compression(
                 },
             )
         },
-        CanonicalVersion::V1_12_2 => {
+        CanonicalVersion::V1_12_2 | CanonicalVersion::V1_15_2 => {
             use kojacoord_protocol::versions::v1_12_x::login::ClientboundSetCompression;
             encode(
                 proto,
@@ -418,7 +418,7 @@ pub fn build_set_compression(
                 },
             )
         },
-        CanonicalVersion::V1_16_5 => {
+        CanonicalVersion::V1_16_5 | CanonicalVersion::V1_18_2 => {
             use kojacoord_protocol::versions::v1_16_x::login::ClientboundSetCompression;
             encode(
                 proto,
@@ -476,11 +476,11 @@ pub fn build_login_disconnect(
             use kojacoord_protocol::versions::v1_8_x::login::ClientboundLoginDisconnect;
             encode(proto, ClientboundLoginDisconnect { reason })
         },
-        CanonicalVersion::V1_12_2 => {
+        CanonicalVersion::V1_12_2 | CanonicalVersion::V1_15_2 => {
             use kojacoord_protocol::versions::v1_12_x::login::ClientboundLoginDisconnect;
             encode(proto, ClientboundLoginDisconnect { reason })
         },
-        CanonicalVersion::V1_16_5 => {
+        CanonicalVersion::V1_16_5 | CanonicalVersion::V1_18_2 => {
             use kojacoord_protocol::versions::v1_16_x::login::ClientboundLoginDisconnect;
             encode(proto, ClientboundLoginDisconnect { reason })
         },
@@ -523,11 +523,11 @@ pub fn build_play_disconnect(
             use kojacoord_protocol::versions::v1_8_x::play::ClientboundDisconnect;
             encode(proto, ClientboundDisconnect { reason })
         },
-        CanonicalVersion::V1_12_2 => {
+        CanonicalVersion::V1_12_2 | CanonicalVersion::V1_15_2 => {
             use kojacoord_protocol::versions::v1_12_x::play::ClientboundDisconnect;
             encode(proto, ClientboundDisconnect { reason })
         },
-        CanonicalVersion::V1_16_5 => {
+        CanonicalVersion::V1_16_5 | CanonicalVersion::V1_18_2 => {
             use kojacoord_protocol::versions::v1_16_x::play::ClientboundDisconnect;
             encode(proto, ClientboundDisconnect { reason })
         },
@@ -599,11 +599,11 @@ pub fn skip_backend_login_success(canonical: CanonicalVersion, cursor: &mut byte
             use kojacoord_protocol::versions::v1_8_x::login::ClientboundLoginSuccess;
             let _ = ClientboundLoginSuccess::decode(cursor);
         },
-        CanonicalVersion::V1_12_2 => {
+        CanonicalVersion::V1_12_2 | CanonicalVersion::V1_15_2 => {
             use kojacoord_protocol::versions::v1_12_x::login::ClientboundLoginSuccess;
             let _ = ClientboundLoginSuccess::decode(cursor);
         },
-        CanonicalVersion::V1_16_5 => {
+        CanonicalVersion::V1_16_5 | CanonicalVersion::V1_18_2 => {
             use kojacoord_protocol::versions::v1_16_x::login::ClientboundLoginSuccess;
             let _ = ClientboundLoginSuccess::decode(cursor);
         },
@@ -660,14 +660,20 @@ pub fn build_backend_login_start(
         return encode(proto, ServerboundLoginStart { username, uuid });
     }
     // 1.16.5: username only (no UUID yet).
-    if matches!(canonical, CanonicalVersion::V1_16_5) {
+    if matches!(
+        canonical,
+        CanonicalVersion::V1_16_5 | CanonicalVersion::V1_18_2
+    ) {
         use kojacoord_protocol::versions::v1_16_x::login::ServerboundLoginStart;
         return encode(proto, ServerboundLoginStart { username });
     }
     // 1.8 / 1.12.2 / 1.7.10: username only.
     if matches!(
         canonical,
-        CanonicalVersion::V1_7_10 | CanonicalVersion::V1_8 | CanonicalVersion::V1_12_2
+        CanonicalVersion::V1_7_10
+            | CanonicalVersion::V1_8
+            | CanonicalVersion::V1_12_2
+            | CanonicalVersion::V1_15_2
     ) {
         use kojacoord_protocol::versions::v1_8_x::login::ServerboundLoginStart;
         return encode(proto, ServerboundLoginStart { username });

@@ -298,7 +298,7 @@ pub fn convert_s2c(
                         let nbt_bytes = cur.copy_to_bytes(nbt_len as usize);
                         Some(
                             kojacoord_protocol::types::Nbt::decode(&mut nbt_bytes.clone())
-                            .unwrap_or_else(|_| kojacoord_protocol::types::Nbt::empty("")),
+                                .unwrap_or_else(|_| kojacoord_protocol::types::Nbt::empty("")),
                         )
                     } else {
                         None
@@ -326,7 +326,10 @@ pub fn convert_s2c(
         },
         V12_S2C_ENTITY_EQUIPMENT => {
             let mut cur = body;
-            let entity_id = cur.get_i32();
+            let entity_id = match VarInt::decode(&mut cur) {
+                Ok(v) => v.0,
+                Err(_) => return ConversionResult::Passthrough,
+            };
             let slot = cur.get_i16();
 
             let has_item = cur.get_u8() != 0;
@@ -342,7 +345,7 @@ pub fn convert_s2c(
                     let nbt_bytes = cur.copy_to_bytes(nbt_len as usize);
                     Some(
                         kojacoord_protocol::types::Nbt::decode(&mut nbt_bytes.clone())
-                        .unwrap_or_else(|_| kojacoord_protocol::types::Nbt::empty("")),
+                            .unwrap_or_else(|_| kojacoord_protocol::types::Nbt::empty("")),
                     )
                 } else {
                     None
@@ -371,7 +374,7 @@ pub fn convert_s2c(
             let modern_slot = items::legacy_slot_to_modern(&legacy_slot);
 
             let mut out = BytesMut::new();
-            out.put_i32(entity_id);
+            VarInt(entity_id).encode(&mut out).unwrap();
             out.put_u8(modern_slot_idx);
             modern_slot.encode(&mut out).unwrap();
 

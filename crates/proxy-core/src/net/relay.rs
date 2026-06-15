@@ -46,16 +46,13 @@ use crate::{
     },
     packet_io::{read_client_packet, read_packet, write_client_packet, write_packet},
     plugin_decoder,
-    protocol::dimension_codec::{
-        build_minimal_dimension_codec, determine_injection_mode, CodecInjectionMode,
-    },
     proxy::ProxyState,
     server_selector,
     session::SharedSession,
     transfer,
 };
 
-use kojacoord_protocol::{Epoch, ProtocolVersion};
+use kojacoord_protocol::ProtocolVersion;
 
 use kojacoord_plugin_system::{PacketData, PacketDirection, PacketHookResult};
 
@@ -132,7 +129,12 @@ impl PacketRelay {
         let hook_result = state
             .plugin_manager
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    "plugin_manager lock poisoned — recovering with potentially corrupt state"
+                );
+                e.into_inner()
+            })
             .process_packet(&packet_data);
         match hook_result {
             PacketHookResult::Forward => Ok(data),
@@ -189,6 +191,8 @@ impl PacketRelay {
         let switch_c2s = Arc::clone(&switch_target);
 
         let player_uuid = self.session.read().await.uuid;
+        // TODO(H8): Switch to bounded channel (65536) for backpressure.
+        // Requires making all senders async or using try_send with drop semantics.
         let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
         // Keep a clone in-scope for converter-driven s2c injection from the c2s
         // task (e.g. synthesizing FinishConfiguration after we swallow a
@@ -196,6 +200,8 @@ impl PacketRelay {
         let inject_s2c_tx = out_tx.clone();
         self.state.outbound.insert(player_uuid, out_tx);
 
+        // TODO(H8): Switch to bounded channel (65536) for backpressure.
+        // Requires making all senders async or using try_send with drop semantics.
         let (backend_out_tx, mut backend_out_rx) =
             tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
         self.state
@@ -269,9 +275,6 @@ impl PacketRelay {
         // Determine config synthesis mode
         let synthesis_mode = determine_synthesis_mode(proto, backend_proto);
 
-        // Determine dimension codec injection mode
-        let codec_injection_mode = determine_injection_mode(proto, backend_proto);
-
         // Check if cookies/transfers are supported
         let supports_cookies = supports_cookies_transfers(proto);
 
@@ -343,10 +346,17 @@ impl PacketRelay {
                 let mut cur = payload.clone();
 
                 let pkt_id = match VarInt::decode(&mut cur) {
-                    Ok(v) => v.0 as u8,
+                    Ok(v) => {
+                        if v.0 < 0 || v.0 > 255 {
+                            tracing::warn!(raw_id = v.0, "S→C packet ID out of u8 range — treating as passthrough");
+                            let mut cw = cw_s2c.lock().await;
+                            write_client_packet(&mut *cw, &payload, proto, client_thresh).await?;
+                            continue;
+                        }
+                        v.0 as u8
+                    }
                     Err(_) => {
-                        let mut cw = cw_s2c.lock().await;
-                        write_client_packet(&mut *cw, &payload, proto, client_thresh).await?;
+                        tracing::warn!("S→C failed to decode packet ID — dropping malformed packet");
                         continue;
                     }
                 };
@@ -573,7 +583,14 @@ impl PacketRelay {
                     let mut cur = payload.clone();
 
                     let pkt_id = match VarInt::decode(&mut cur) {
-                        Ok(v) => v.0 as u8,
+                        Ok(v) => {
+                            if v.0 < 0 || v.0 > 255 {
+                                tracing::warn!(raw_id = v.0, "C→S packet ID out of u8 range — treating as passthrough");
+                                write_packet(&mut *bw_mut, &payload, backend_thresh).await?;
+                                continue;
+                            }
+                            v.0 as u8
+                        }
                         Err(_) => {
                             tracing::warn!("exploit_guard: failed to decode packet id — kicking");
                             kick!(
@@ -625,7 +642,10 @@ impl PacketRelay {
                             let responses = state_c2s
                                 .plugin_manager
                                 .read()
-                                .unwrap_or_else(|e| e.into_inner())
+                                .unwrap_or_else(|e| {
+                                    tracing::error!("plugin_manager lock poisoned — recovering with potentially corrupt state");
+                                    e.into_inner()
+                                })
                                 .broadcast_event(
                                 &kojacoord_plugin_system::PluginEvent::PlayerMove {
                                     uuid,
@@ -677,7 +697,7 @@ impl PacketRelay {
 
                             if server_selector::is_serverlist_channel(&msg.channel) {
                                 let payload =
-                                    server_selector::build_serverlist_payload(&state_c2s).await;
+                                    server_selector::build_serverlist_payload(&state_c2s, player_uuid).await;
 
                                 let pkt_raw =
                                     build_plugin_message_packet(&msg.channel, &payload, proto);
@@ -733,7 +753,10 @@ impl PacketRelay {
                                 state_c2s
                                     .plugin_manager
                                     .read()
-                                    .unwrap_or_else(|e| e.into_inner())
+                                    .unwrap_or_else(|e| {
+                                        tracing::error!("plugin_manager lock poisoned — recovering with potentially corrupt state");
+                                        e.into_inner()
+                                    })
                                     .broadcast_event(
                                         &kojacoord_plugin_system::PluginEvent::PluginMessage {
                                             uuid,
@@ -914,47 +937,6 @@ impl PacketRelay {
                             }
                         }
 
-                        // Dimension codec injection: inject codec data if needed
-                        if codec_injection_mode == CodecInjectionMode::ClientSide {
-                            // Check if this is a JoinGame packet
-                            // JoinGame packet ID varies by protocol
-                            let canonical = ProtocolVersion::from_id(proto);
-                            let join_game_id = match canonical.epoch() {
-                                Epoch::V1_19 => 0x26,
-                                Epoch::V1_16 => 0x25,
-                                Epoch::V1_17_To_1_18 => 0x25,
-                                Epoch::V1_20 => 0x2B,
-                                Epoch::V1_21Plus => 0x2E,
-                                _ => 0x25, // fallback for older versions
-                            };
-                            if pkt_id == join_game_id {
-                                tracing::trace!("Dimension codec injection needed for JoinGame");
-                                // Build and inject minimal dimension codec
-                                match build_minimal_dimension_codec() {
-                                    Ok(codec_bytes) => {
-                                        tracing::debug!("Injecting dimension codec NBT ({} bytes)", codec_bytes.len());
-                                        // For 1.16-1.20.1, codec is embedded in JoinGame
-                                        // For 1.20.2+, codec is sent separately via RegistryData packet
-                                        // We'll inject it as a separate RegistryData packet for simplicity
-                                        let registry_packet_id = match canonical.epoch() {
-                                            Epoch::V1_21Plus => 0x05, // RegistryData in 1.21+
-                                            _ => 0x04, // RegistryData in 1.20.2-1.20.5
-                                        };
-
-                                        let mut registry_packet = BytesMut::new();
-                                        let _ = VarInt(registry_packet_id).encode(&mut registry_packet);
-                                        registry_packet.extend_from_slice(&codec_bytes);
-
-                                        // Inject the registry packet before JoinGame
-                                        let _ = inject_s2c_tx.send(registry_packet.freeze());
-                                    },
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "Failed to build dimension codec NBT");
-                                    },
-                                }
-                            }
-                        }
-
                         // Use modified payload if signature was stripped
                         let payload_to_send = if modified_payload != payload {
                             modified_payload.clone()
@@ -1002,9 +984,12 @@ impl PacketRelay {
         self.state.outbound.remove(&player_uuid);
         self.state.backend_outbound.remove(&player_uuid);
 
+        let transferred = self.session.read().await.transferred;
         if let Some(srv_name) = self.session.read().await.current_server.clone() {
-            if let Some(srv) = self.state.server_registry.get(&srv_name) {
-                srv.player_count.fetch_sub(1, Ordering::Relaxed);
+            if !transferred {
+                if let Some(srv) = self.state.server_registry.get(&srv_name) {
+                    srv.player_count.fetch_sub(1, Ordering::Relaxed);
+                }
             }
         }
         self.session.write().await.current_server = None;
@@ -1100,6 +1085,7 @@ async fn handle_transfer_command(
                     }
                     backend.player_count.fetch_add(1, Ordering::Relaxed);
                     session.write().await.current_server = Some(server.clone());
+                    session.write().await.transferred = true;
                     tracing::info!(server = %server, "relay: transfer requested");
                 },
                 None => tracing::warn!(%server, "relay: connect to unknown server ignored"),
@@ -1117,6 +1103,7 @@ async fn handle_transfer_command(
                     new_srv.player_count.fetch_add(1, Ordering::Relaxed);
                 }
                 target.write().await.current_server = Some(server.clone());
+                target.write().await.transferred = true;
                 tracing::info!(%uuid, %server, "relay: ConnectOther transferred");
             } else {
                 tracing::warn!(%uuid, %server, "relay: ConnectOther player not found");

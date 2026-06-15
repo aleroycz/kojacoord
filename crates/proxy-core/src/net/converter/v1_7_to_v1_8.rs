@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! 1.7.10 (protocol 5) ↔ 1.8.x (protocol 47) translation, server→client and
 //! client→server.
 //!
@@ -107,7 +108,6 @@ const V17_S2C_PLUGIN_MESSAGE: u8 = 0x3F;
 const V17_S2C_DISCONNECT: u8 = 0x40;
 
 // ── 1.8 (protocol 47) S2C packet IDs ────────────────────────────────────────
-#[allow(dead_code)]
 const V18_S2C_KEEP_ALIVE: u8 = 0x00;
 const V18_S2C_JOIN_GAME: u8 = 0x01;
 const V18_S2C_CHAT: u8 = 0x02;
@@ -182,7 +182,6 @@ const V18_S2C_PLAYER_LIST_HEADER_FOOTER: u8 = 0x47;
 const V18_S2C_RESOURCE_PACK: u8 = 0x48;
 
 // ── 1.7 (protocol 5) C2S packet IDs ─────────────────────────────────────────
-#[allow(dead_code)]
 const V17_C2S_KEEP_ALIVE: u8 = 0x00;
 const V17_C2S_CHAT: u8 = 0x01;
 const V17_C2S_USE_ENTITY: u8 = 0x02;
@@ -209,7 +208,6 @@ const V17_C2S_CLIENT_STATUS: u8 = 0x16;
 const V17_C2S_PLUGIN_MESSAGE: u8 = 0x17;
 
 // ── 1.8 (protocol 47) C2S packet IDs ────────────────────────────────────────
-#[allow(dead_code)]
 const V18_C2S_KEEP_ALIVE: u8 = 0x00;
 const V18_C2S_CHAT: u8 = 0x01;
 const V18_C2S_USE_ENTITY: u8 = 0x02;

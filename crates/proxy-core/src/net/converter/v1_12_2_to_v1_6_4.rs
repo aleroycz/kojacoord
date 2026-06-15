@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Reverse of `v1_6_4_to_v1_12_2.rs`: convert client-to-server (c2s)
 //! packets from a 1.12.2 (or composition-folded modern) client into
 //! the pre-netty 1.6.4 wire format a Notchian 1.6.4 server expects.
@@ -706,11 +707,8 @@ pub fn convert_s2c(payload: Bytes) -> ConversionResult {
             ConversionResult::Drop
         },
         // Drop post-1.6 additions that have no pre-netty equivalent.
-        0x0C | 0x0D | 0x17 | 0x1D | 0x29 | 0x2B | 0x2D | 0x30
-        | 0x31 | 0x34 | 0x37 | 0x38 | 0x39 | 0x43 | 0x48 | 0x49
-        | 0x4A | 0x4D => {
-            ConversionResult::Drop
-        },
+        0x0C | 0x0D | 0x17 | 0x1D | 0x29 | 0x2B | 0x2D | 0x30 | 0x31 | 0x34 | 0x37 | 0x38
+        | 0x39 | 0x43 | 0x48 | 0x49 | 0x4A | 0x4D => ConversionResult::Drop,
         _ => ConversionResult::Passthrough,
     }
 }
@@ -1215,14 +1213,26 @@ fn s2c_spawn_object(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; u8 type; f64 x/y/z; i8 pitch/yaw; i32 objectData; [i16 vx/vy/vz]
     // 1.6.4: i32 eid; i8 type; i32 x_fp32/y_fp32/z_fp32; i8 pitch/yaw; i32 objectData; [i16 vx/vy/vz]
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
-    let Some(typ) = r.u8() else { return ConversionResult::Passthrough; };
-    let Some(x) = r.f64() else { return ConversionResult::Passthrough; };
-    let Some(y) = r.f64() else { return ConversionResult::Passthrough; };
-    let Some(z) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(typ) = r.u8() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(x) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(y) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(z) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
     let yaw = r.u8().unwrap_or(0);
     let pitch = r.u8().unwrap_or(0);
-    let Some(data) = r.i32() else { return ConversionResult::Passthrough; };
+    let Some(data) = r.i32() else {
+        return ConversionResult::Passthrough;
+    };
 
     let mut out = BytesMut::new();
     out.put_i32(eid);
@@ -1233,12 +1243,10 @@ fn s2c_spawn_object(body: Bytes) -> ConversionResult {
     out.put_u8(yaw);
     out.put_u8(pitch);
     out.put_i32(data);
-    if data != 0 {
-        if r.remaining() >= 6 {
-            out.put_i16(r.i16().unwrap_or(0));
-            out.put_i16(r.i16().unwrap_or(0));
-            out.put_i16(r.i16().unwrap_or(0));
-        }
+    if data != 0 && r.remaining() >= 6 {
+        out.put_i16(r.i16().unwrap_or(0));
+        out.put_i16(r.i16().unwrap_or(0));
+        out.put_i16(r.i16().unwrap_or(0));
     }
     ConversionResult::Converted(vec![build_payload(V164_S2C_SPAWN_OBJECT, &out)])
 }
@@ -1247,10 +1255,18 @@ fn s2c_spawn_exp_orb(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; f64 x/y/z; i16 count
     // 1.6.4: i32 eid; i32 x_fp32/y_fp32/z_fp32; i16 count
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
-    let Some(x) = r.f64() else { return ConversionResult::Passthrough; };
-    let Some(y) = r.f64() else { return ConversionResult::Passthrough; };
-    let Some(z) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(x) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(y) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(z) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
     let count = r.i16().unwrap_or(0);
 
     let mut out = BytesMut::new();
@@ -1266,11 +1282,21 @@ fn s2c_spawn_global(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; i8 type; i32 x/y/z
     // 1.6.4: i32 eid; i8 type; i32 x/y/z
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
-    let Some(typ) = r.i8() else { return ConversionResult::Passthrough; };
-    let Some(x) = r.i32() else { return ConversionResult::Passthrough; };
-    let Some(y) = r.i32() else { return ConversionResult::Passthrough; };
-    let Some(z) = r.i32() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(typ) = r.i8() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(x) = r.i32() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(y) = r.i32() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(z) = r.i32() else {
+        return ConversionResult::Passthrough;
+    };
 
     let mut out = BytesMut::new();
     out.put_i32(eid);
@@ -1285,11 +1311,21 @@ fn s2c_spawn_mob(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; u8 type; f64 x/y/z; i8 yaw/pitch/headPitch; i16 vx/vy/vz; metadata
     // 1.6.4: i32 eid; u8 type; i32 x_fp32/y_fp32/z_fp32; i8 yaw/pitch/headPitch; i16 vx/vy/vz; metadata
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
-    let Some(typ) = r.u8() else { return ConversionResult::Passthrough; };
-    let Some(x) = r.f64() else { return ConversionResult::Passthrough; };
-    let Some(y) = r.f64() else { return ConversionResult::Passthrough; };
-    let Some(z) = r.f64() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(typ) = r.u8() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(x) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(y) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(z) = r.f64() else {
+        return ConversionResult::Passthrough;
+    };
     let yaw = r.u8().unwrap_or(0);
     let pitch = r.u8().unwrap_or(0);
     let head_pitch = r.u8().unwrap_or(0);
@@ -1317,9 +1353,15 @@ fn s2c_spawn_painting(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; string title; Position packed; u8 direction
     // 1.6.4: i32 eid; UCS-2 title; i32 x; i32 y; i32 z; i32 direction
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
-    let Some(title) = r.string() else { return ConversionResult::Passthrough; };
-    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(title) = r.string() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(packed) = r.i64() else {
+        return ConversionResult::Passthrough;
+    };
     let direction = r.u8().unwrap_or(0);
     let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
 
@@ -1337,8 +1379,12 @@ fn s2c_animation(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; u8 animation
     // 1.6.4: i32 eid; u8 animation
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
-    let Some(anim) = r.u8() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(anim) = r.u8() else {
+        return ConversionResult::Passthrough;
+    };
 
     let mut out = BytesMut::new();
     out.put_i32(eid);
@@ -1350,12 +1396,18 @@ fn s2c_statistics(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt count; (string name, VarInt value)[]
     // 1.6.4: i32 count; (UCS-2 name, i32 value)[]
     let mut r = super::safe::Reader::new(body);
-    let Some(count) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(count) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
     let mut out = BytesMut::new();
     out.put_i32(count);
     for _ in 0..count {
-        let Some(name) = r.string() else { return ConversionResult::Passthrough; };
-        let Some(value) = r.varint() else { return ConversionResult::Passthrough; };
+        let Some(name) = r.string() else {
+            return ConversionResult::Passthrough;
+        };
+        let Some(value) = r.varint() else {
+            return ConversionResult::Passthrough;
+        };
         encode_legacy_string(&name, &mut out);
         out.put_i32(value);
     }
@@ -1366,8 +1418,12 @@ fn s2c_block_break_anim(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; Position; i8 destroyStage
     // 1.6.4: i32 eid; i32 x; i32 y; i32 z; i8 destroyStage
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
-    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(packed) = r.i64() else {
+        return ConversionResult::Passthrough;
+    };
     let stage = r.i8().unwrap_or(0);
     let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
 
@@ -1384,8 +1440,12 @@ fn s2c_tile_entity_data(body: Bytes) -> ConversionResult {
     // 1.12.2: Position; u8 action; NBT data
     // 1.6.4: i32 x; i16 y; i32 z; u8 action; NBT data
     let mut r = super::safe::Reader::new(body);
-    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
-    let Some(action) = r.u8() else { return ConversionResult::Passthrough; };
+    let Some(packed) = r.i64() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(action) = r.u8() else {
+        return ConversionResult::Passthrough;
+    };
     let nbt_rest = r.rest();
     let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
 
@@ -1402,7 +1462,9 @@ fn s2c_block_action(body: Bytes) -> ConversionResult {
     // 1.12.2: Position; u8 byte1; u8 byte2; VarInt blockId
     // 1.6.4: i32 x; i16 y; i32 z; u8 byte1; u8 byte2; i16 blockId
     let mut r = super::safe::Reader::new(body);
-    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let Some(packed) = r.i64() else {
+        return ConversionResult::Passthrough;
+    };
     let byte1 = r.u8().unwrap_or(0);
     let byte2 = r.u8().unwrap_or(0);
     let block_id = r.varint().unwrap_or(0);
@@ -1422,9 +1484,15 @@ fn s2c_open_window(body: Bytes) -> ConversionResult {
     // 1.12.2: u8 windowId; string inventoryType; string windowTitle; u8 slotCount; [i32 entityId]
     // 1.6.4: u8 windowId; u8 inventoryType; UCS-2 windowTitle; u8 slotCount; [u8 useProvidedTitle; i32 entityId]
     let mut r = super::safe::Reader::new(body);
-    let Some(wid) = r.u8() else { return ConversionResult::Passthrough; };
-    let Some(inv_type_str) = r.string() else { return ConversionResult::Passthrough; };
-    let Some(title) = r.string() else { return ConversionResult::Passthrough; };
+    let Some(wid) = r.u8() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(inv_type_str) = r.string() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(title) = r.string() else {
+        return ConversionResult::Passthrough;
+    };
     let slot_count = r.u8().unwrap_or(0);
     let inv_type_id: u8 = match inv_type_str.as_str() {
         "minecraft:chest" => 0,
@@ -1468,8 +1536,12 @@ fn s2c_set_slot(body: Bytes) -> ConversionResult {
     // 1.6.4: i8 windowId; i16 slot; Slot (legacy format)
     // Slot format differs — we forward the header and emit an empty slot to avoid garbage.
     let mut r = super::safe::Reader::new(body);
-    let Some(wid) = r.i8() else { return ConversionResult::Passthrough; };
-    let Some(slot) = r.i16() else { return ConversionResult::Passthrough; };
+    let Some(wid) = r.i8() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(slot) = r.i16() else {
+        return ConversionResult::Passthrough;
+    };
 
     let mut out = BytesMut::new();
     out.put_i8(wid);
@@ -1483,8 +1555,12 @@ fn s2c_window_items(body: Bytes) -> ConversionResult {
     // 1.6.4: u8 windowId; i16 count; Slot[] (legacy format)
     // Slot format differs structurally — emit empty slots to avoid garbage.
     let mut r = super::safe::Reader::new(body);
-    let Some(wid) = r.u8() else { return ConversionResult::Passthrough; };
-    let Some(count) = r.i16() else { return ConversionResult::Passthrough; };
+    let Some(wid) = r.u8() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(count) = r.i16() else {
+        return ConversionResult::Passthrough;
+    };
 
     let mut out = BytesMut::new();
     out.put_u8(wid);
@@ -1516,7 +1592,9 @@ fn s2c_confirm_transaction(body: Bytes) -> ConversionResult {
 fn s2c_open_sign_editor(body: Bytes) -> ConversionResult {
     // 1.12.2: Position. 1.6.4: i32 x; i32 y; i32 z
     let mut r = super::safe::Reader::new(body);
-    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let Some(packed) = r.i64() else {
+        return ConversionResult::Passthrough;
+    };
     let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
     let mut out = BytesMut::new();
     out.put_i32(pos.x);
@@ -1529,10 +1607,14 @@ fn s2c_tab_complete(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt count; string[]
     // 1.6.4: UCS-2 string (NUL-separated)
     let mut r = super::safe::Reader::new(body);
-    let Some(count) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(count) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
     let mut parts: Vec<String> = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let Some(s) = r.string() else { return ConversionResult::Passthrough; };
+        let Some(s) = r.string() else {
+            return ConversionResult::Passthrough;
+        };
         parts.push(s);
     }
     let joined = parts.join("\0");
@@ -1545,13 +1627,17 @@ fn s2c_scoreboard_obj(body: Bytes) -> ConversionResult {
     // 1.12.2: string name; i8 mode; [string displayName; string type]
     // 1.6.4: UCS-2 name; i8 mode; [UCS-2 displayName; UCS-2 type]
     let mut r = super::safe::Reader::new(body);
-    let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+    let Some(name) = r.string() else {
+        return ConversionResult::Passthrough;
+    };
     let mode = r.u8().unwrap_or(0);
     let mut out = BytesMut::new();
     encode_legacy_string(&name, &mut out);
     out.put_u8(mode);
     if mode == 0 || mode == 2 {
-        let Some(display) = r.string() else { return ConversionResult::Passthrough; };
+        let Some(display) = r.string() else {
+            return ConversionResult::Passthrough;
+        };
         let rest_type = r.string().unwrap_or_else(|| "integer".to_owned());
         encode_legacy_string(&display, &mut out);
         encode_legacy_string(&rest_type, &mut out);
@@ -1563,9 +1649,13 @@ fn s2c_update_score(body: Bytes) -> ConversionResult {
     // 1.12.2: string name; i8 action; string objective; VarInt value
     // 1.6.4: UCS-2 name; i8 action; UCS-2 objective; i32 value
     let mut r = super::safe::Reader::new(body);
-    let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+    let Some(name) = r.string() else {
+        return ConversionResult::Passthrough;
+    };
     let action = r.u8().unwrap_or(0);
-    let Some(obj) = r.string() else { return ConversionResult::Passthrough; };
+    let Some(obj) = r.string() else {
+        return ConversionResult::Passthrough;
+    };
     let value = r.varint().unwrap_or(0);
     let mut out = BytesMut::new();
     encode_legacy_string(&name, &mut out);
@@ -1580,7 +1670,9 @@ fn s2c_display_scoreboard(body: Bytes) -> ConversionResult {
     // 1.6.4: i8 slot; UCS-2 name
     let mut r = super::safe::Reader::new(body);
     let slot = r.i8().unwrap_or(0);
-    let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+    let Some(name) = r.string() else {
+        return ConversionResult::Passthrough;
+    };
     let mut out = BytesMut::new();
     out.put_i8(slot);
     encode_legacy_string(&name, &mut out);
@@ -1592,7 +1684,9 @@ fn s2c_teams(body: Bytes) -> ConversionResult {
     // 1.6.4: UCS-2 name; i8 mode; [UCS-2 displayName; UCS-2 prefix; UCS-2 suffix; i8 flags; i8 color; i8 friendlyFire]
     // Team format is complex and version-dependent — best-effort passthrough.
     let mut r = super::safe::Reader::new(body);
-    let Some(name) = r.string() else { return ConversionResult::Passthrough; };
+    let Some(name) = r.string() else {
+        return ConversionResult::Passthrough;
+    };
     let mode = r.u8().unwrap_or(0);
     let mut out = BytesMut::new();
     encode_legacy_string(&name, &mut out);
@@ -1625,14 +1719,18 @@ fn s2c_teams(body: Bytes) -> ConversionResult {
 
 fn s2c_entity_status(body: Bytes) -> ConversionResult {
     // 1.12.2: i32 eid; i8 status. 1.6.4: i32 eid; i8 status.
-    if body.remaining() < 5 { return ConversionResult::Passthrough; }
+    if body.remaining() < 5 {
+        return ConversionResult::Passthrough;
+    }
     ConversionResult::Converted(vec![build_payload(V164_S2C_ENTITY_STATUS, &body)])
 }
 
 fn s2c_attach_entity(body: Bytes) -> ConversionResult {
     // 1.12.2: i32 eid; i32 vehicleId; bool leash
     // 1.6.4: i32 eid; i32 vehicleId; bool leash
-    if body.remaining() < 9 { return ConversionResult::Passthrough; }
+    if body.remaining() < 9 {
+        return ConversionResult::Passthrough;
+    }
     ConversionResult::Converted(vec![build_payload(V164_S2C_ATTACH_ENTITY, &body)])
 }
 
@@ -1640,7 +1738,9 @@ fn s2c_entity_metadata(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; metadata. 1.6.4: i32 eid; metadata.
     // Metadata format is incompatible — stub terminator.
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
     let mut out = BytesMut::new();
     out.put_i32(eid);
     out.put_u8(0x7F); // metadata terminator
@@ -1651,7 +1751,9 @@ fn s2c_entity_effect(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; i8 effectId; i8 amplifier; VarInt duration; bool hideParticles
     // 1.6.4: i32 eid; i8 effectId; i8 amplifier; i16 duration
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
     let effect_id = r.i8().unwrap_or(0);
     let amplifier = r.i8().unwrap_or(0);
     let duration = r.varint().unwrap_or(0);
@@ -1666,7 +1768,9 @@ fn s2c_entity_effect(body: Bytes) -> ConversionResult {
 fn s2c_remove_entity_effect(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; i8 effectId. 1.6.4: i32 eid; i8 effectId.
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
     let effect_id = r.i8().unwrap_or(0);
     let mut out = BytesMut::new();
     out.put_i32(eid);
@@ -1678,14 +1782,22 @@ fn s2c_entity_properties(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; i32 count; (string key; f64 value; VarInt modCount; (UUID f64 i8)[])[]
     // 1.6.4: i32 eid; i32 count; (string key; f64 value; i16 modCount; (UUID f64 i8)[])[]
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
-    let Some(prop_count) = r.i32() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(prop_count) = r.i32() else {
+        return ConversionResult::Passthrough;
+    };
     let mut out = BytesMut::new();
     out.put_i32(eid);
     out.put_i32(prop_count);
     for _ in 0..prop_count {
-        let Some(key) = r.string() else { return ConversionResult::Passthrough; };
-        let Some(value) = r.f64() else { return ConversionResult::Passthrough; };
+        let Some(key) = r.string() else {
+            return ConversionResult::Passthrough;
+        };
+        let Some(value) = r.f64() else {
+            return ConversionResult::Passthrough;
+        };
         let mod_count = r.varint().unwrap_or(0);
         key.encode(&mut out).unwrap();
         out.put_f64(value);
@@ -1707,7 +1819,9 @@ fn s2c_entity_properties(body: Bytes) -> ConversionResult {
 fn s2c_entity_velocity(body: Bytes) -> ConversionResult {
     // 1.12.2: VarInt eid; i16 vx/vy/vz. 1.6.4: i32 eid; i16 vx/vy/vz.
     let mut r = super::safe::Reader::new(body);
-    let Some(eid) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(eid) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
     let vx = r.i16().unwrap_or(0);
     let vy = r.i16().unwrap_or(0);
     let vz = r.i16().unwrap_or(0);
@@ -1723,8 +1837,12 @@ fn s2c_effect(body: Bytes) -> ConversionResult {
     // 1.12.2: i32 effectId; Position; i32 data; bool global
     // 1.6.4: i32 effectId; i32 x; i32 y; i32 z; i32 data; bool global
     let mut r = super::safe::Reader::new(body);
-    let Some(effect_id) = r.i32() else { return ConversionResult::Passthrough; };
-    let Some(packed) = r.i64() else { return ConversionResult::Passthrough; };
+    let Some(effect_id) = r.i32() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(packed) = r.i64() else {
+        return ConversionResult::Passthrough;
+    };
     let data = r.i32().unwrap_or(0);
     let global = r.u8().unwrap_or(0);
     let pos = kojacoord_protocol::types::decode_legacy_position(packed as u64);
@@ -1751,11 +1869,21 @@ fn s2c_explosion(body: Bytes) -> ConversionResult {
     // 1.6.4: f32 x/y/z; f32 radius; i32 count; (i8,i8,i8)[]; f32 motionX/Y/Z
     // Very similar — only count type differs (VarInt vs i32).
     let mut r = super::safe::Reader::new(body);
-    let Some(x) = r.f32() else { return ConversionResult::Passthrough; };
-    let Some(y) = r.f32() else { return ConversionResult::Passthrough; };
-    let Some(z) = r.f32() else { return ConversionResult::Passthrough; };
-    let Some(radius) = r.f32() else { return ConversionResult::Passthrough; };
-    let Some(count) = r.varint() else { return ConversionResult::Passthrough; };
+    let Some(x) = r.f32() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(y) = r.f32() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(z) = r.f32() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(radius) = r.f32() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(count) = r.varint() else {
+        return ConversionResult::Passthrough;
+    };
     let mut out = BytesMut::new();
     out.put_f32(x);
     out.put_f32(y);
@@ -1781,7 +1909,9 @@ fn s2c_explosion(body: Bytes) -> ConversionResult {
 
 fn s2c_game_state(body: Bytes) -> ConversionResult {
     // 1.12.2: u8 reason; f32 value. 1.6.4: i8 reason; f32 value.
-    if body.remaining() < 5 { return ConversionResult::Passthrough; }
+    if body.remaining() < 5 {
+        return ConversionResult::Passthrough;
+    }
     let out = BytesMut::from(body.as_ref());
     ConversionResult::Converted(vec![build_payload(V164_S2C_GAME_STATE, &out)])
 }
@@ -1793,7 +1923,9 @@ fn s2c_game_state(body: Bytes) -> ConversionResult {
 fn c2s_tab_complete(mut body: Bytes) -> ConversionResult {
     // 1.12.2: string text; bool assumeCommand; [bool hasPos; Position]
     // 1.6.4: UCS-2 text
-    let Ok(text) = String::decode(&mut body) else { return ConversionResult::Passthrough; };
+    let Ok(text) = String::decode(&mut body) else {
+        return ConversionResult::Passthrough;
+    };
     let mut out = BytesMut::new();
     encode_legacy_string(&text, &mut out);
     ConversionResult::Converted(vec![build_payload(V164_C2S_TAB_COMPLETE, &out)])
@@ -1801,13 +1933,17 @@ fn c2s_tab_complete(mut body: Bytes) -> ConversionResult {
 
 fn c2s_confirm_transaction(body: Bytes) -> ConversionResult {
     // 1.12.2: i8 windowId; i16 action; bool accepted. 1.6.4: same.
-    if body.remaining() < 4 { return ConversionResult::Passthrough; }
+    if body.remaining() < 4 {
+        return ConversionResult::Passthrough;
+    }
     ConversionResult::Converted(vec![build_payload(V164_C2S_CONFIRM_TRANSACTION, &body)])
 }
 
 fn c2s_enchant_item(body: Bytes) -> ConversionResult {
     // 1.12.2: i8 windowId; i8 enchantment. 1.6.4: same.
-    if body.remaining() < 2 { return ConversionResult::Passthrough; }
+    if body.remaining() < 2 {
+        return ConversionResult::Passthrough;
+    }
     ConversionResult::Converted(vec![build_payload(V164_C2S_ENCHANT_ITEM, &body)])
 }
 
@@ -1816,8 +1952,12 @@ fn c2s_window_click(body: Bytes) -> ConversionResult {
     // 1.6.4: i8 windowId; i16 slot; i8 button; i16 action; i8 mode; Slot (legacy)
     // Slot format differs structurally — we emit an empty slot.
     let mut r = super::safe::Reader::new(body);
-    let Some(wid) = r.u8() else { return ConversionResult::Passthrough; };
-    let Some(slot) = r.i16() else { return ConversionResult::Passthrough; };
+    let Some(wid) = r.u8() else {
+        return ConversionResult::Passthrough;
+    };
+    let Some(slot) = r.i16() else {
+        return ConversionResult::Passthrough;
+    };
     let button = r.u8().unwrap_or(0);
     let action = r.i16().unwrap_or(0);
     let mode = r.varint().unwrap_or(0);
@@ -1835,7 +1975,9 @@ fn c2s_creative_inv(body: Bytes) -> ConversionResult {
     // 1.12.2: i16 slot; Slot. 1.6.4: i16 slot; Slot (legacy).
     // Emit empty slot for safety.
     let mut r = super::safe::Reader::new(body);
-    let Some(slot) = r.i16() else { return ConversionResult::Passthrough; };
+    let Some(slot) = r.i16() else {
+        return ConversionResult::Passthrough;
+    };
     let mut out = BytesMut::new();
     out.put_i16(slot);
     out.put_i16(-1); // empty slot
@@ -1844,7 +1986,9 @@ fn c2s_creative_inv(body: Bytes) -> ConversionResult {
 
 fn c2s_steer_vehicle(mut body: Bytes) -> ConversionResult {
     // 1.12.2: f32 sideways; f32 forward; u8 flags. 1.6.4: f32 sideways; f32 forward; bool jump; bool unmount.
-    if body.remaining() < 9 { return ConversionResult::Passthrough; }
+    if body.remaining() < 9 {
+        return ConversionResult::Passthrough;
+    }
     let sideways = body.get_f32();
     let forward = body.get_f32();
     let flags = body.get_u8();

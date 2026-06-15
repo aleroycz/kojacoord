@@ -258,6 +258,11 @@ impl Encode for ClientboundLoginSuccess {
         VarInt(user_bytes.len() as i32).encode(dst)?;
         dst.put_slice(user_bytes);
 
+        VarInt(self.properties.len() as i32).encode(dst)?;
+        for prop in &self.properties {
+            prop.encode(dst)?;
+        }
+
         Ok(())
     }
 }
@@ -303,10 +308,16 @@ impl Decode for ClientboundLoginSuccess {
             ))
         })?;
 
+        let prop_count = VarInt::decode(src)?.0 as usize;
+        let mut properties = Vec::with_capacity(prop_count);
+        for _ in 0..prop_count {
+            properties.push(ProfileProperty::decode(src)?);
+        }
+
         Ok(Self {
             uuid,
             username,
-            properties: Vec::new(),
+            properties,
         })
     }
 }

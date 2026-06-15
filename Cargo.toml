@@ -105,6 +105,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # concurrent data structures
 dashmap = "6"
 
+# ip networks
+ipnet = { version = "2", features = ["serde"] }
+
 [profile.release]
 opt-level = 3
 lto = "fat"

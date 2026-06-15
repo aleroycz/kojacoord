@@ -13,6 +13,9 @@ pub enum HandlerError {
 
     #[error("protocol error: {0}")]
     Protocol(#[from] kojacoord_protocol::ProtocolError),
+
+    #[error("invalid data length: {0}")]
+    InvalidDataLength(i32),
 }
 
 #[derive(Debug, Error)]

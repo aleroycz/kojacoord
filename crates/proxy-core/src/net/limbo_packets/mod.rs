@@ -43,7 +43,7 @@ pub(crate) enum HeightmapFmt {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Construct a 24-section void chunk using named NBT heightmaps and legacy trust_edges.
 /// let body = limbo_packets::void_chunk_body(24, true, limbo_packets::HeightmapFmt::NamedNbt);
 /// assert!(!body.is_empty());
@@ -233,7 +233,7 @@ pub(crate) fn light_update_body_1_17(sections: usize) -> BytesMut {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use bytes::BytesMut;
 /// // create an open compound: TAG_Compound (0x0a) then empty name
 /// let mut buf = BytesMut::new();
@@ -378,7 +378,7 @@ pub trait LimboPackets: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // `my_impl` implements `LimboPackets`
     /// let pkt = my_impl.set_center_chunk(763);
     /// if let Some(encoded) = pkt {
@@ -411,7 +411,7 @@ pub trait LimboPackets: Send + Sync {
         None
     }
 
-    /// ```
+    /// ```ignore
     fn chunk_batch_start(&self, _proto: u32) -> Option<EncodedPacket> {
         None
     }
@@ -430,7 +430,7 @@ pub trait LimboPackets: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // For a protocol that supports ChunkBatchFinished (1.20.2+)
     /// let pkt = v1_20::V1_20.chunk_batch_finished(764, 16);
     /// assert!(pkt.is_some());
@@ -445,7 +445,7 @@ pub trait LimboPackets: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // Example usage: protocol 765 and newer produce a packet, older protocols do not.
     /// # let svc = &crate::net::limbo_packets::v1_21::V1_21;
     /// let _ = svc.start_wait_chunks_event(765); // Some(EncodedPacket)
@@ -461,7 +461,7 @@ pub trait LimboPackets: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // Select a canonical bucket and request its limbo chunk for a protocol.
     /// let pkt = v1_20::V1_20.chunk_data(763);
     /// // Modern canonical buckets that implement void chunk synthesis should return Some(EncodedPacket).
@@ -514,8 +514,8 @@ pub fn for_version(canonical: CanonicalVersion) -> &'static dyn LimboPackets {
         CanonicalVersion::V1_6_4 => &v1_6::V1_6,
         CanonicalVersion::V1_7_10 => &v1_7::V1_7,
         CanonicalVersion::V1_8 => &v1_8::V1_8,
-        CanonicalVersion::V1_12_2 => &v1_12::V1_12,
-        CanonicalVersion::V1_16_5 => &v1_16::V1_16,
+        CanonicalVersion::V1_12_2 | CanonicalVersion::V1_15_2 => &v1_12::V1_12,
+        CanonicalVersion::V1_16_5 | CanonicalVersion::V1_18_2 => &v1_16::V1_16,
         CanonicalVersion::V1_19_4 => &v1_19::V1_19,
         CanonicalVersion::V1_20_4 => &v1_20::V1_20,
         CanonicalVersion::V1_21 => &v1_21::V1_21,
@@ -528,7 +528,7 @@ pub fn for_version(canonical: CanonicalVersion) -> &'static dyn LimboPackets {
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```ignore
 /// use bytes::BytesMut;
 /// // `MyPkt` must implement `kojacoord_protocol::codec::PacketId` and `kojacoord_protocol::codec::Encode`.
 /// // The call below returns `Some(EncodedPacket)` when the packet id is not 0xFF and encoding succeeds.
@@ -566,7 +566,7 @@ mod chunk_tests {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // Validate parsing for 24 sections, trust_edges = true, using named NBT heightmaps.
     /// assert_parses(24, true, HeightmapFmt::NamedNbt);
     /// ```

@@ -127,7 +127,7 @@ impl AnalyticsEngine {
             let hour_start = hour_time
                 .date_naive()
                 .and_hms_opt(hour_time.hour(), 0, 0)
-                .unwrap();
+                .unwrap_or_else(|| hour_time.date_naive().and_hms_opt(0, 0, 0).unwrap());
             let hour_start_utc = DateTime::from_naive_utc_and_offset(hour_start, Utc);
 
             history.push((hour_start_utc, joins.saturating_sub(leaves)));

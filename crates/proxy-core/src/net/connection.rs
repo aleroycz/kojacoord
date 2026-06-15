@@ -102,6 +102,8 @@ impl Cfb8State {
     }
 }
 
+const MAX_WRITE_BUF_SIZE: usize = 4 * 1024 * 1024;
+
 pub struct EncryptedStream {
     inner: TcpStream,
     enc: Cfb8State,
@@ -173,6 +175,9 @@ impl AsyncWrite for EncryptedStream {
 
         let mut encrypted = buf.to_vec();
         this.enc.encrypt(&mut encrypted);
+        if this.write_buf.len() + encrypted.len() > MAX_WRITE_BUF_SIZE {
+            return Poll::Pending;
+        }
         this.write_buf.extend_from_slice(&encrypted);
 
         match this.poll_drain(cx) {
@@ -410,7 +415,12 @@ impl ClientConnection {
         if self.state.config.proxy.proxy_protocol {
             if self.state.config.proxy.proxy_protocol_optional {
                 // Optional mode: try to parse PROXY header, fall back to direct connection
-                match crate::net::proxy_protocol::read_proxy_header_optional(&mut self.stream).await
+                match crate::net::proxy_protocol::read_proxy_header_optional(
+                    &mut self.stream,
+                    self.addr,
+                    &self.state.config.proxy.trusted_proxies,
+                )
+                .await
                 {
                     Ok(crate::net::proxy_protocol::ProxyHeaderResult::Found(real_addr)) => {
                         tracing::debug!(original = %self.addr, real = %real_addr, "parsed PROXY protocol header");
@@ -428,8 +438,12 @@ impl ClientConnection {
                 }
             } else {
                 // Strict mode: PROXY header is required
-                match crate::net::proxy_protocol::read_proxy_header(&mut self.stream, self.addr)
-                    .await
+                match crate::net::proxy_protocol::read_proxy_header(
+                    &mut self.stream,
+                    self.addr,
+                    &self.state.config.proxy.trusted_proxies,
+                )
+                .await
                 {
                     Ok(real_addr) => {
                         tracing::debug!(original = %self.addr, real = %real_addr, "parsed proxy protocol header");
@@ -1195,6 +1209,7 @@ impl ClientConnection {
                 AuthEvent::EncryptionResponse {
                     shared_secret_enc: enc_shared_secret,
                     verify_token_enc: enc_verify_token,
+                    proto_version: self.protocol_version,
                 },
                 client_ip,
             )
@@ -1399,6 +1414,7 @@ impl ClientConnection {
             protocol_version: self.protocol_version,
             state: ConnectionState::Play,
             current_server: None,
+            transferred: false,
             properties: properties
                 .iter()
                 .map(|p| kojacoord_auth::ProfileProperty {
@@ -1984,18 +2000,36 @@ impl ClientConnection {
                     kojacoord_protocol::ProtocolError::UnexpectedEof,
                 ));
             }
-            let ss_len = bytes.get_i16() as usize;
+            let ss_len_raw = bytes.get_i16();
+            if ss_len_raw < 0 || bytes.remaining() < ss_len_raw as usize {
+                return Err(ConnectionError::Protocol(
+                    kojacoord_protocol::ProtocolError::UnexpectedEof,
+                ));
+            }
+            let ss_len = ss_len_raw as usize;
             let ss: Vec<u8> = bytes.split_to(ss_len).to_vec();
             if bytes.remaining() < 2 {
                 return Err(ConnectionError::Protocol(
                     kojacoord_protocol::ProtocolError::UnexpectedEof,
                 ));
             }
-            let vt_len = bytes.get_i16() as usize;
+            let vt_len_raw = bytes.get_i16();
+            if vt_len_raw < 0 || bytes.remaining() < vt_len_raw as usize {
+                return Err(ConnectionError::Protocol(
+                    kojacoord_protocol::ProtocolError::UnexpectedEof,
+                ));
+            }
+            let vt_len = vt_len_raw as usize;
             let vt: Vec<u8> = bytes.split_to(vt_len).to_vec();
             Ok((ss, vt))
         } else {
-            let ss_len = VarInt::decode(&mut bytes)?.0 as usize;
+            let ss_len_raw = VarInt::decode(&mut bytes)?.0;
+            if ss_len_raw < 0 || bytes.remaining() < ss_len_raw as usize {
+                return Err(ConnectionError::Protocol(
+                    kojacoord_protocol::ProtocolError::UnexpectedEof,
+                ));
+            }
+            let ss_len = ss_len_raw as usize;
             let ss: Vec<u8> = bytes.split_to(ss_len).to_vec();
 
             // 1.19 / 1.19.1 / 1.19.2 (proto 759-760) inserted a
@@ -2020,7 +2054,13 @@ impl ClientConnection {
                 }
                 let has_verify_token = bytes.get_u8() != 0;
                 if has_verify_token {
-                    let vt_len = VarInt::decode(&mut bytes)?.0 as usize;
+                    let vt_len_raw = VarInt::decode(&mut bytes)?.0;
+                    if vt_len_raw < 0 || bytes.remaining() < vt_len_raw as usize {
+                        return Err(ConnectionError::Protocol(
+                            kojacoord_protocol::ProtocolError::UnexpectedEof,
+                        ));
+                    }
+                    let vt_len = vt_len_raw as usize;
                     let vt: Vec<u8> = bytes.split_to(vt_len).to_vec();
                     Ok((ss, vt))
                 } else {
@@ -2035,12 +2075,24 @@ impl ClientConnection {
                         ));
                     }
                     let _salt = bytes.get_i64();
-                    let sig_len = VarInt::decode(&mut bytes)?.0 as usize;
+                    let sig_len_raw = VarInt::decode(&mut bytes)?.0;
+                    if sig_len_raw < 0 || bytes.remaining() < sig_len_raw as usize {
+                        return Err(ConnectionError::Protocol(
+                            kojacoord_protocol::ProtocolError::UnexpectedEof,
+                        ));
+                    }
+                    let sig_len = sig_len_raw as usize;
                     let _sig: Vec<u8> = bytes.split_to(sig_len).to_vec();
                     Ok((ss, Vec::new()))
                 }
             } else {
-                let vt_len = VarInt::decode(&mut bytes)?.0 as usize;
+                let vt_len_raw = VarInt::decode(&mut bytes)?.0;
+                if vt_len_raw < 0 || bytes.remaining() < vt_len_raw as usize {
+                    return Err(ConnectionError::Protocol(
+                        kojacoord_protocol::ProtocolError::UnexpectedEof,
+                    ));
+                }
+                let vt_len = vt_len_raw as usize;
                 let vt: Vec<u8> = bytes.split_to(vt_len).to_vec();
                 Ok((ss, vt))
             }
@@ -2842,7 +2894,21 @@ impl ClientConnection {
         }
 
         loop {
-            let resp_raw = crate::packet_io::read_packet(&mut self.stream, client_thresh).await?;
+            let resp_raw = match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                crate::packet_io::read_packet(&mut self.stream, client_thresh),
+            )
+            .await
+            {
+                Ok(Ok(raw)) => raw,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timed out waiting for AcknowledgeFinishConfiguration",
+                    )));
+                },
+            };
             let mut rcursor = resp_raw.clone();
             let rpkt = VarInt::decode(&mut rcursor)
                 .map_err(ConnectionError::Protocol)?
@@ -2939,28 +3005,32 @@ fn decode_encryption_request(
         if src.remaining() < 2 {
             return Err(kojacoord_protocol::ProtocolError::UnexpectedEof);
         }
-        let pk_len = src.get_i16() as usize;
-        if src.remaining() < pk_len + 2 {
+        let pk_len_raw = src.get_i16();
+        if pk_len_raw < 0 || src.remaining() < pk_len_raw.saturating_add(2) as usize {
             return Err(kojacoord_protocol::ProtocolError::UnexpectedEof);
         }
+        let pk_len = pk_len_raw as usize;
         let public_key = src.split_to(pk_len).to_vec();
-        let vt_len = src.get_i16() as usize;
-        if src.remaining() < vt_len {
+        let vt_len_raw = src.get_i16();
+        if vt_len_raw < 0 || src.remaining() < vt_len_raw as usize {
             return Err(kojacoord_protocol::ProtocolError::UnexpectedEof);
         }
+        let vt_len = vt_len_raw as usize;
         let verify_token = src.split_to(vt_len).to_vec();
         Ok((server_id, public_key, verify_token))
     } else {
         // VarInt-prefixed byte arrays (1.8 onward — every epoch from V1_8 up).
-        let pk_len = VarInt::decode(src)?.0 as usize;
-        if src.remaining() < pk_len {
+        let pk_len_raw = VarInt::decode(src)?.0;
+        if pk_len_raw < 0 || src.remaining() < pk_len_raw as usize {
             return Err(kojacoord_protocol::ProtocolError::UnexpectedEof);
         }
+        let pk_len = pk_len_raw as usize;
         let public_key = src.split_to(pk_len).to_vec();
-        let vt_len = VarInt::decode(src)?.0 as usize;
-        if src.remaining() < vt_len {
+        let vt_len_raw = VarInt::decode(src)?.0;
+        if vt_len_raw < 0 || src.remaining() < vt_len_raw as usize {
             return Err(kojacoord_protocol::ProtocolError::UnexpectedEof);
         }
+        let vt_len = vt_len_raw as usize;
         let verify_token = src.split_to(vt_len).to_vec();
         Ok((server_id, public_key, verify_token))
     }
@@ -2977,6 +3047,9 @@ fn encode_encryption_request(
     use bytes::BufMut;
     server_id.to_string().encode(dst)?;
     if matches!(epoch, Epoch::V1_7) {
+        if public_key.len() > i16::MAX as usize || verify_token.len() > i16::MAX as usize {
+            return Err(kojacoord_protocol::ProtocolError::UnexpectedEof);
+        }
         dst.put_i16(public_key.len() as i16);
         dst.extend_from_slice(public_key);
         dst.put_i16(verify_token.len() as i16);

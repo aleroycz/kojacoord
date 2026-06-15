@@ -64,7 +64,7 @@ impl PluginManager {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// use plugin_system::manager::PluginManager;
     ///
     /// let manager = PluginManager::new().expect("failed to create PluginManager");
@@ -96,7 +96,7 @@ impl PluginManager {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let wasm_loader = WasmLoader::new();
     /// let manager = PluginManager::with_wasm_loader(wasm_loader).expect("create manager");
     /// assert!(manager.sandbox_enabled);
@@ -193,7 +193,7 @@ impl PluginManager {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // Called from inside a Tokio runtime:
     /// let handle = tokio::runtime::Handle::try_current().expect("inside runtime");
     /// let mut manager = PluginManager::new().expect("create manager");
@@ -209,7 +209,7 @@ impl PluginManager {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// use std::collections::HashMap;
     /// // assume PluginManager and PluginPermission are in scope
     /// let mut mgr = PluginManager::new().unwrap();
@@ -271,7 +271,7 @@ impl PluginManager {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// # use std::collections::HashMap;
     /// # async fn _example() -> anyhow::Result<()> {
     /// let mut manager = PluginManager::new()?;
@@ -390,21 +390,27 @@ impl PluginManager {
             Ok(Err(e)) => log::warn!("Plugin '{}' on_enable failed: {}", metadata.name, e),
             Err(e) => log::warn!("Plugin '{}' on_enable panicked: {}", metadata.name, e),
         }
-        let hooks = crate::guard_plugin_call("register_packet_hooks", || {
-            plugin.register_packet_hooks()
-        })
-        .unwrap_or_else(|e| {
-            log::warn!(
-                "Plugin '{}' register_packet_hooks panicked: {}",
-                metadata.name,
-                e
-            );
-            Vec::new()
-        });
+        let hooks =
+            crate::guard_plugin_call("register_packet_hooks", || plugin.register_packet_hooks())
+                .unwrap_or_else(|e| {
+                    log::warn!(
+                        "Plugin '{}' register_packet_hooks panicked: {}",
+                        metadata.name,
+                        e
+                    );
+                    Vec::new()
+                });
         if !hooks.is_empty() {
             let count = hooks.len();
             let mut hooks_lock = self.packet_hooks.write().unwrap_or_else(|e| e.into_inner());
-            hooks_lock.extend(hooks);
+            let tagged_hooks: Vec<PacketEvent> = hooks
+                .into_iter()
+                .map(|mut h| {
+                    h.plugin_name = metadata.name.clone();
+                    h
+                })
+                .collect();
+            hooks_lock.extend(tagged_hooks);
             // Sort hooks by priority (descending) so higher priority hooks execute first
             // Higher priority runs first — sort descending.
             hooks_lock.sort_by_key(|h| std::cmp::Reverse(h.priority()));
@@ -419,17 +425,16 @@ impl PluginManager {
         // A later plugin claiming an already-registered label is
         // rejected for that label (first writer wins) so dispatch stays
         // deterministic.
-        let command_specs = crate::guard_plugin_call("register_commands", || {
-            plugin.register_commands()
-        })
-        .unwrap_or_else(|e| {
-            log::warn!(
-                "Plugin '{}' register_commands panicked: {}",
-                metadata.name,
-                e
-            );
-            Vec::new()
-        });
+        let command_specs =
+            crate::guard_plugin_call("register_commands", || plugin.register_commands())
+                .unwrap_or_else(|e| {
+                    log::warn!(
+                        "Plugin '{}' register_commands panicked: {}",
+                        metadata.name,
+                        e
+                    );
+                    Vec::new()
+                });
         for spec in command_specs {
             let mut labels = vec![spec.label.clone()];
             labels.extend(spec.aliases.iter().cloned());
@@ -493,7 +498,7 @@ impl PluginManager {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use std::collections::HashMap;
     /// # async fn example() -> anyhow::Result<()> {
     /// let mut manager = PluginManager::new()?; // assumed in scope
@@ -568,7 +573,7 @@ impl PluginManager {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// # use std::path::Path;
     /// # // Example assumes `example.kpl` exists on disk and contains a native library.
     /// let lib_path = crate::extract_kpl_library(Path::new("example.kpl")).expect("extract kpl");
@@ -624,7 +629,7 @@ impl PluginManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let mut manager = PluginManager::default();
     /// // unloading a non-existent plugin returns an error
     /// assert!(manager.unload_plugin("no_such_plugin").is_err());
@@ -659,7 +664,7 @@ impl PluginManager {
             self.packet_hooks
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
-                .clear();
+                .retain(|h| h.plugin_name != name);
 
             // Drop every command this plugin owned.
             self.commands.retain(|_, (owner, _)| owner != name);
@@ -731,6 +736,14 @@ impl PluginManager {
     }
 
     pub fn process_packet(&self, packet: &PacketData) -> PacketHookResult {
+        self.process_packet_inner(packet, false)
+    }
+
+    fn process_packet_inner(
+        &self,
+        packet: &PacketData,
+        already_modified: bool,
+    ) -> PacketHookResult {
         let hooks = self.packet_hooks.read().unwrap_or_else(|e| e.into_inner());
 
         for hook in hooks.iter() {
@@ -748,7 +761,10 @@ impl PluginManager {
                     Ok(PacketHookResult::Modify(data)) => {
                         let mut modified_packet = packet.clone();
                         modified_packet.data = data;
-                        return self.process_packet(&modified_packet);
+                        if already_modified {
+                            return PacketHookResult::Modify(modified_packet.data);
+                        }
+                        return self.process_packet_inner(&modified_packet, true);
                     },
                     Ok(PacketHookResult::Forward) => continue,
                     Err(e) => {

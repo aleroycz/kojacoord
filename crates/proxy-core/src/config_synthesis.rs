@@ -151,7 +151,7 @@ pub fn build_cfg_packets(protocol_version: u32) -> Result<Vec<Vec<u8>>, String> 
     };
 
     let mut finish = BytesMut::new();
-    VarInt(finish_id as i32)
+    VarInt(finish_id)
         .encode(&mut finish)
         .map_err(|e| format!("encode finish id: {}", e))?;
     packets.push(finish.to_vec());
@@ -188,8 +188,16 @@ mod tests {
     #[test]
     fn proto_766_includes_registry_data() {
         let packets = build_cfg_packets(766).unwrap();
-        assert!(packets.len() > 1, "expected RegistryData + Finish, got {} packets", packets.len());
-        assert_eq!(packets[packets.len() - 1][0], 0x03, "last packet should be FinishConfiguration");
+        assert!(
+            packets.len() > 1,
+            "expected RegistryData + Finish, got {} packets",
+            packets.len()
+        );
+        assert_eq!(
+            packets[packets.len() - 1][0],
+            0x03,
+            "last packet should be FinishConfiguration"
+        );
     }
 
     #[test]

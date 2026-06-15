@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::codec::{Decode, Encode, PacketId};
+use crate::codec::{Decode, DecodeVer, Encode, PacketId};
 use crate::error::ProtocolError;
 use crate::types::VarInt;
 
@@ -255,8 +255,8 @@ mod packets {
         }
     }
 
-    impl Decode for ClientboundJoinGame {
-        fn decode(src: &mut Bytes) -> Result<Self, ProtocolError> {
+    impl DecodeVer for ClientboundJoinGame {
+        fn decode_ver(ver: u32, src: &mut Bytes) -> Result<Self, ProtocolError> {
             if src.remaining() < 4 {
                 return Err(ProtocolError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -278,9 +278,6 @@ mod packets {
             for _ in 0..world_count {
                 world_names.push(decode_string(src)?);
             }
-            // Skip the dimension codec NBT by reading it as a self-framing
-            // blob — defer to crate::types::nbt::skip if available, else
-            // assume the round-trip caller will supply an empty Vec.
             let codec_start = src.clone();
             let codec_len = crate::types::nbt::skip(src).unwrap_or(0);
             let dimension_codec = if codec_len > 0 {
@@ -288,10 +285,17 @@ mod packets {
             } else {
                 Vec::new()
             };
-            // Decoder lacks proto context; default to Identifier shape.
-            // Round-tripping NBT-shaped frames requires the caller to
-            // re-encode with the correct DimensionRef variant.
-            let dimension = DimensionRef::Identifier(decode_string(src)?);
+            let dimension = if ver <= 750 || ver >= 759 {
+                DimensionRef::Identifier(decode_string(src)?)
+            } else {
+                let dim_start = src.clone();
+                let dim_len = crate::types::nbt::skip(src).unwrap_or(0);
+                if dim_len > 0 {
+                    DimensionRef::Nbt(dim_start.slice(..dim_len).to_vec())
+                } else {
+                    DimensionRef::Nbt(Vec::new())
+                }
+            };
             let world_name = decode_string(src)?;
             if src.remaining() < 8 {
                 return Err(ProtocolError::Io(std::io::Error::new(

@@ -63,6 +63,9 @@ impl Decode for VarInt {
             }
             let byte = src.get_u8();
             bytes_read += 1;
+            if bytes_read == VARINT_MAX_BYTES && byte & 0xF0 != 0 {
+                return Err(ProtocolError::VarIntOverflow(bytes_read));
+            }
             result |= ((byte & 0x7F) as u32) << shift;
             shift += 7;
             if byte & 0x80 == 0 {

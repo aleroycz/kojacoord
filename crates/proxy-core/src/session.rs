@@ -31,6 +31,7 @@ pub struct PlayerSession {
     pub protocol_version: u32,
     pub state: ConnectionState,
     pub current_server: Option<String>,
+    pub transferred: bool,
     pub properties: Vec<kojacoord_auth::ProfileProperty>,
     pub locale: Option<String>,
     pub view_distance: Option<u8>,

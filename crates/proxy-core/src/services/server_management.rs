@@ -111,6 +111,9 @@ impl ServerManagementServer {
         let mut line = String::new();
 
         buf_reader.read_line(&mut line).await?;
+        if line.len() > 65536 {
+            anyhow::bail!("line exceeds 64 KiB limit");
+        }
 
         debug!("Received message: {}", line.trim());
 
@@ -410,6 +413,7 @@ impl ServerManagementServer {
                 );
             }
             target.write().await.current_server = Some(transfer.server.clone());
+            target.write().await.transferred = true;
 
             info!(
                 "Successfully transferred player {} to server {}",

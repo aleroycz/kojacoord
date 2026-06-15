@@ -186,12 +186,19 @@ impl PacketRegistry {
             return Some(meta.name);
         }
 
+        let request_is_pre_netty = proto == 78;
         let mut best_proto: Option<u32> = None;
         let mut best_name: Option<&'static str> = None;
         for (p, meta) in dir_vec {
-            if meta.id == id && *p <= proto && best_proto.map_or(true, |bp| *p > bp) {
-                best_proto = Some(*p);
-                best_name = Some(meta.name);
+            if meta.id == id && *p <= proto {
+                let candidate_is_pre_netty = *p == 78;
+                if candidate_is_pre_netty != request_is_pre_netty {
+                    continue;
+                }
+                if best_proto.map_or(true, |bp| *p > bp) {
+                    best_proto = Some(*p);
+                    best_name = Some(meta.name);
+                }
             }
         }
         best_name

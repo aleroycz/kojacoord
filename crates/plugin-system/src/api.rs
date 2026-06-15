@@ -544,6 +544,7 @@ pub struct PacketEvent {
     /// Priority determines execution order: higher values execute first.
     /// Default priority is 0. Negative values are allowed for low-priority hooks.
     priority: i32,
+    pub plugin_name: String,
 }
 
 impl PacketEvent {
@@ -552,7 +553,13 @@ impl PacketEvent {
             filter,
             hook,
             priority: 0,
+            plugin_name: String::new(),
         }
+    }
+
+    pub fn with_plugin_name(mut self, name: impl Into<String>) -> Self {
+        self.plugin_name = name.into();
+        self
     }
 
     pub fn hook_to_clientbound<F>(
@@ -572,6 +579,7 @@ impl PacketEvent {
             filter,
             hook: Box::new(hook),
             priority: 0,
+            plugin_name: String::new(),
         }
     }
 
@@ -593,6 +601,7 @@ impl PacketEvent {
             filter,
             hook: Box::new(hook),
             priority: 0,
+            plugin_name: String::new(),
         }
     }
 

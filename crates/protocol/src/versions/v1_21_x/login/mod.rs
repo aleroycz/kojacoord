@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::codec::{decode_byte_array, encode_byte_array, Decode, Encode, PacketId};
 use crate::error::ProtocolError;
@@ -239,7 +239,7 @@ impl Decode for ClientboundLoginPluginRequest {
     fn decode(src: &mut Bytes) -> Result<Self, ProtocolError> {
         let message_id = VarInt::decode(src)?;
         let channel = String::decode(src)?;
-        let data = src.split_to(src.len()).to_vec();
+        let data = src.split_to(src.remaining()).to_vec();
         Ok(Self {
             message_id,
             channel,
@@ -311,7 +311,7 @@ impl Decode for ServerboundLoginPluginResponse {
         let message_id = VarInt::decode(src)?;
         let understood = bool::decode(src)?;
         let data = if understood {
-            Some(src.split_to(src.len()).to_vec())
+            Some(src.split_to(src.remaining()).to_vec())
         } else {
             None
         };

@@ -57,44 +57,17 @@ pub fn apply_sandbox(_config: &SandboxConfig) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn apply_linux_sandbox(config: &SandboxConfig) -> Result<()> {
-    use std::fs;
+    // RLIMIT_NOFILE and RLIMIT_NPROC are removed: they are process-wide
+    // resource limits that cannot be applied per-thread on Linux. Setting
+    // them here would cripple the proxy's own networking (NOFILE=64) and
+    // child-process spawning (NPROC=0). Use containers or namespaces for
+    // per-plugin isolation instead.
 
     if !config.allow_filesystem {
-        // SAFETY: `setrlimit` reads a fully-initialised `rlimit` struct through a
-        // valid shared reference for the duration of the call. The resource id is
-        // a libc constant and the return value is checked; no UB is possible.
-        unsafe {
-            let rlim = libc::rlimit {
-                rlim_cur: 64,
-                rlim_max: 64,
-            };
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
-                warn!(
-                    "Failed to set RLIMIT_NOFILE: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
-
-        // SAFETY: identical contract to the RLIMIT_NOFILE call above — a valid,
-        // initialised `rlimit` passed by shared reference to a checked syscall.
-        unsafe {
-            let rlim = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            if libc::setrlimit(libc::RLIMIT_NPROC, &rlim) != 0 {
-                warn!(
-                    "Failed to set RLIMIT_NPROC: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
-
-        warn!("Filesystem access restricted via resource limits");
+        warn!("Filesystem access restricted - requires namespace/chroot isolation");
     }
 
-    if fs::metadata("/proc/self/seccomp").is_ok() {
+    if std::fs::metadata("/proc/self/seccomp").is_ok() {
         info!("seccomp available - advanced sandboxing possible");
 
         if !config.allow_network {
@@ -121,29 +94,14 @@ fn apply_linux_sandbox(config: &SandboxConfig) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn apply_macos_sandbox(config: &SandboxConfig) -> Result<()> {
-    use std::fs;
-
-    if fs::metadata("/System/Library/Sandbox").is_ok() {
+    if std::fs::metadata("/System/Library/Sandbox").is_ok() {
         info!("macOS Sandbox framework available");
     }
 
     if !config.allow_filesystem {
+        // RLIMIT_NOFILE is process-wide on macOS as well; setting it here
+        // would limit the proxy's own file descriptors, not just the plugin's.
         warn!("Filesystem access restricted - macOS sandbox requires proper entitlements");
-
-        // SAFETY: `setrlimit` reads a fully-initialised `rlimit` through a valid
-        // shared reference for the call's duration; the return value is checked.
-        unsafe {
-            let rlim = libc::rlimit {
-                rlim_cur: 64,
-                rlim_max: 64,
-            };
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
-                warn!(
-                    "Failed to set RLIMIT_NOFILE: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
     }
 
     Ok(())

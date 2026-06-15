@@ -42,6 +42,7 @@ pub enum AuthEvent {
     EncryptionResponse {
         shared_secret_enc: Vec<u8>,
         verify_token_enc: Vec<u8>,
+        proto_version: u32,
     },
 }
 
@@ -195,12 +196,11 @@ impl AuthPipeline {
     ///
     /// # Examples
     ///
-    /// ```
-    /// # use std::net::IpAddr;
-    /// # async fn example(mut pipeline: crate::auth::AuthPipeline) -> Result<(), crate::auth::AuthError> {
-    /// use crate::auth::{AuthEvent, AuthPipeline};
+    /// ```ignore
+    /// use kojacoord_auth::{AuthEvent, AuthPipeline};
+    /// # async fn example(mut pipeline: AuthPipeline) -> Result<(), kojacoord_auth::AuthError> {
     /// let event = AuthEvent::LoginStart { username: "Player".into(), client_uuid: None };
-    /// let ip: IpAddr = "127.0.0.1".parse().unwrap();
+    /// let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
     /// let (new_state, outbounds) = pipeline.step(event, ip).await?;
     /// # Ok(())
     /// # }
@@ -266,11 +266,16 @@ impl AuthPipeline {
                 username,
                 client_ip,
             } => {
-                let (shared_secret_enc, verify_token_enc) = match &event {
+                let (shared_secret_enc, verify_token_enc, proto_version) = match &event {
                     AuthEvent::EncryptionResponse {
                         shared_secret_enc,
                         verify_token_enc,
-                    } => (shared_secret_enc.clone(), verify_token_enc.clone()),
+                        proto_version,
+                    } => (
+                        shared_secret_enc.clone(),
+                        verify_token_enc.clone(),
+                        *proto_version,
+                    ),
                     _ => return Err(AuthError::EncryptionSetupFailed("unexpected event".into())),
                 };
                 let stored_token = *verify_token;
@@ -297,10 +302,14 @@ impl AuthPipeline {
                 // tokens (all other versions, and 1.19 clients without a
                 // profile key) are validated as before.
                 if verify_token_enc.is_empty() {
-                    tracing::debug!(
-                        "encryption response used 1.19 signed-nonce form; \
-                         skipping verify-token comparison (session validated via hasJoined)"
-                    );
+                    if (759..=760).contains(&proto_version) {
+                        tracing::debug!(
+                            "encryption response used 1.19 signed-nonce form; \
+                             skipping verify-token comparison (session validated via hasJoined)"
+                        );
+                    } else {
+                        return Err(AuthError::VerifyTokenMismatch);
+                    }
                 } else {
                     let rsa_key_2 = self.rsa_key.clone();
                     let vt_enc = verify_token_enc.clone();

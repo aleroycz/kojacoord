@@ -295,7 +295,14 @@ pub fn encode_byte_array(data: &[u8], dst: &mut BytesMut) -> Result<(), Protocol
 }
 
 pub fn decode_byte_array(src: &mut Bytes) -> Result<Vec<u8>, ProtocolError> {
-    let len = crate::types::VarInt::decode(src)?.0 as usize;
+    let raw = crate::types::VarInt::decode(src)?.0;
+    if raw < 0 {
+        return Err(ProtocolError::PacketTooLarge(raw as usize, MAX_PACKET_SIZE));
+    }
+    let len = raw as usize;
+    if len > MAX_PACKET_SIZE {
+        return Err(ProtocolError::PacketTooLarge(len, MAX_PACKET_SIZE));
+    }
     if src.remaining() < len {
         return Err(ProtocolError::UnexpectedEof);
     }
@@ -330,9 +337,18 @@ impl<T: Encode> Encode for Vec<T> {
     }
 }
 
+const MAX_VEC_LEN: usize = 65536;
+
 impl<T: Decode> Decode for Vec<T> {
     fn decode(src: &mut Bytes) -> Result<Self, ProtocolError> {
-        let len = crate::types::VarInt::decode(src)?.0 as usize;
+        let raw = crate::types::VarInt::decode(src)?.0;
+        if raw < 0 {
+            return Err(ProtocolError::PacketTooLarge(raw as usize, MAX_VEC_LEN));
+        }
+        let len = raw as usize;
+        if len > MAX_VEC_LEN {
+            return Err(ProtocolError::PacketTooLarge(len, MAX_VEC_LEN));
+        }
         let mut out = Vec::with_capacity(len.min(4096));
         for _ in 0..len {
             out.push(T::decode(src)?);

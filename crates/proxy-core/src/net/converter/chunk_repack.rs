@@ -57,6 +57,17 @@ impl ChunkRepacker {
         &self.block_converter
     }
 
+    fn bits_per_block_for_palette(palette_len: usize) -> usize {
+        let bpb = 4.max(palette_len.next_power_of_two().trailing_zeros() as usize);
+        if bpb <= 4 {
+            4
+        } else if bpb <= 8 {
+            8
+        } else {
+            bpb
+        }
+    }
+
     /// Repack chunk data from one version to another
     pub fn repack(
         &self,
@@ -108,8 +119,7 @@ impl ChunkRepacker {
         let mut cursor = Cursor::new(data);
         let mut sections = Vec::new();
 
-        // Read bitmask for chunk sections
-        let bitmask = cursor.get_u8();
+        let bitmask = cursor.get_u16_le();
 
         for i in 0..16 {
             if (bitmask & (1 << i)) != 0 {
@@ -147,8 +157,7 @@ impl ChunkRepacker {
         let mut cursor = Cursor::new(data);
         let mut sections = Vec::new();
 
-        // Read bitmask
-        let bitmask = cursor.get_u8();
+        let bitmask = cursor.get_u16_le();
 
         for i in 0..16 {
             if (bitmask & (1 << i)) != 0 {
@@ -171,21 +180,29 @@ impl ChunkRepacker {
                     );
                 }
 
-                // Read block state data
                 let data_len = cursor.get_u32_le() as usize;
+                if data_len > 16_777_216 {
+                    return Err(format!(
+                        "Block state data too large: {data_len} bytes (max 16 MiB)"
+                    ));
+                }
+                if data_len > cursor.remaining() {
+                    return Err(format!(
+                        "Block state data ({data_len} bytes) exceeds remaining buffer ({} bytes)",
+                        cursor.remaining()
+                    ));
+                }
                 let mut block_state_data = vec![0u8; data_len];
                 cursor
                     .read_exact(&mut block_state_data)
                     .map_err(|e| format!("Failed to read block state data: {}", e))?;
 
-                // Parse as long array
                 let mut block_state_cursor = Cursor::new(block_state_data);
                 let long_count = (4096 * bits_per_block as usize).div_ceil(64);
                 for _ in 0..long_count {
                     section.block_states.push(block_state_cursor.get_i64_le());
                 }
 
-                // Read lights
                 cursor
                     .read_exact(&mut section.block_light)
                     .map_err(|e| format!("Failed to read block light: {}", e))?;
@@ -225,11 +242,9 @@ impl ChunkRepacker {
         let mut cursor = Cursor::new(data);
         let mut sections = Vec::new();
 
-        // Read bitmask
-        let bitmask = cursor.get_u8();
+        let bitmask = cursor.get_i32_le();
 
         for i in 0..24 {
-            // 1.18+ has up to 24 sections
             if (bitmask & (1 << i)) != 0 {
                 let mut section = NewHeightChunkSection::new();
 
@@ -250,6 +265,17 @@ impl ChunkRepacker {
                 }
 
                 let data_len = cursor.get_u32_le() as usize;
+                if data_len > 16_777_216 {
+                    return Err(format!(
+                        "Block state data too large: {data_len} bytes (max 16 MiB)"
+                    ));
+                }
+                if data_len > cursor.remaining() {
+                    return Err(format!(
+                        "Block state data ({data_len} bytes) exceeds remaining buffer ({} bytes)",
+                        cursor.remaining()
+                    ));
+                }
                 let mut block_state_data = vec![0u8; data_len];
                 cursor
                     .read_exact(&mut block_state_data)
@@ -328,25 +354,39 @@ impl ChunkRepacker {
                     let mut flattened = FlattenedChunkSection::new();
                     let mut palette = std::collections::HashSet::new();
 
-                    // Convert each block
                     for i in 0..4096 {
                         let block_id = section.blocks[i] as u16;
                         let metadata = (section.metadata[i / 2] >> ((i % 2) * 4)) & 0x0F;
                         let combined_id = (block_id << 4) | metadata as u16;
 
                         let flattened_name = self.block_converter.to_flattened(combined_id);
-                        palette.insert(flattened_name.clone());
+                        palette.insert(flattened_name);
+                    }
 
-                        // Use palette index
-                        let palette_vec: Vec<_> = palette.iter().cloned().collect();
+                    flattened.palette = palette.into_iter().collect();
+                    let bits_per_block = Self::bits_per_block_for_palette(flattened.palette.len());
+                    let entries_per_long = 64 / bits_per_block;
+                    let long_count = (4096 * bits_per_block).div_ceil(64);
+                    flattened.block_states = vec![0i64; long_count];
+
+                    let palette_vec: Vec<_> = flattened.palette.to_vec();
+                    for i in 0..4096 {
+                        let block_id = section.blocks[i] as u16;
+                        let metadata = (section.metadata[i / 2] >> ((i % 2) * 4)) & 0x0F;
+                        let combined_id = (block_id << 4) | metadata as u16;
+
+                        let flattened_name = self.block_converter.to_flattened(combined_id);
                         let index = palette_vec
                             .iter()
                             .position(|x| x == &flattened_name)
                             .unwrap_or(0);
-                        flattened.block_states[i / 64] |= (index as i64) << ((i % 64) * 4);
+
+                        let long_idx = i / entries_per_long;
+                        let offset = (i % entries_per_long) * bits_per_block;
+                        let mask = (1i64 << bits_per_block) - 1;
+                        flattened.block_states[long_idx] |= (index as i64 & mask) << offset;
                     }
 
-                    flattened.palette = palette.into_iter().collect();
                     flattened.block_light = section.block_light.clone();
                     flattened.sky_light = section.sky_light.clone();
 
@@ -367,10 +407,14 @@ impl ChunkRepacker {
 
                 for section in sections {
                     let mut legacy = LegacyChunkSection::new();
+                    let bits_per_block = Self::bits_per_block_for_palette(section.palette.len());
+                    let entries_per_long = 64 / bits_per_block;
+                    let mask = (1i64 << bits_per_block) - 1;
 
                     for i in 0..4096 {
-                        let palette_index =
-                            (section.block_states[i / 64] >> ((i % 64) * 4)) & 0x0F_i64;
+                        let long_idx = i / entries_per_long;
+                        let offset = (i % entries_per_long) * bits_per_block;
+                        let palette_index = (section.block_states[long_idx] >> offset) & mask;
                         let flattened_name = section
                             .palette
                             .get(palette_index as usize)
@@ -502,11 +546,11 @@ impl ChunkRepacker {
     fn encode_legacy_chunk(&self, chunk: &ChunkData, buf: &mut BytesMut) -> Result<(), String> {
         match chunk {
             ChunkData::Legacy(sections) => {
-                let mut bitmask = 0u8;
+                let mut bitmask = 0u16;
                 for (i, _section) in sections.iter().enumerate() {
                     bitmask |= 1 << i;
                 }
-                buf.put_u8(bitmask);
+                buf.put_u16_le(bitmask);
 
                 for section in sections {
                     buf.put_slice(&section.blocks);
@@ -525,14 +569,15 @@ impl ChunkRepacker {
     fn encode_flattened_chunk(&self, chunk: &ChunkData, buf: &mut BytesMut) -> Result<(), String> {
         match chunk {
             ChunkData::Flattened(sections) => {
-                let mut bitmask = 0u8;
+                let mut bitmask = 0u16;
                 for (i, _) in sections.iter().enumerate() {
                     bitmask |= 1 << i;
                 }
-                buf.put_u8(bitmask);
+                buf.put_u16_le(bitmask);
 
                 for section in sections {
-                    buf.put_u8(4); // bits per block
+                    let bits_per_block = Self::bits_per_block_for_palette(section.palette.len());
+                    buf.put_u8(bits_per_block as u8);
                     buf.put_u16_le(section.palette.len() as u16);
 
                     for name in &section.palette {
@@ -569,14 +614,16 @@ impl ChunkRepacker {
     fn encode_new_height_chunk(&self, chunk: &ChunkData, buf: &mut BytesMut) -> Result<(), String> {
         match chunk {
             ChunkData::NewHeight(sections) => {
-                let mut bitmask = 0u8;
+                let mut bitmask = 0i32;
                 for (i, _) in sections.iter().enumerate() {
                     bitmask |= 1 << i;
                 }
-                buf.put_u8(bitmask);
+                buf.put_i32_le(bitmask);
 
                 for section in sections {
-                    buf.put_u8(4); // bits per block
+                    let bits_per_block =
+                        Self::bits_per_block_for_palette(section.block_states.palette.len());
+                    buf.put_u8(bits_per_block as u8);
                     buf.put_u16_le(section.block_states.palette.len() as u16);
 
                     for name in &section.block_states.palette {

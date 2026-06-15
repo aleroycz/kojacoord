@@ -1,6 +1,6 @@
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::codec::{Decode, Encode, PacketId};
+use crate::codec::{Decode, DecodeVer, Encode, PacketId};
 use crate::error::ProtocolError;
 use crate::types::VarInt;
 
@@ -266,8 +266,8 @@ impl Encode for ClientboundLogin {
     }
 }
 
-impl Decode for ClientboundLogin {
-    fn decode(src: &mut Bytes) -> Result<Self, ProtocolError> {
+impl DecodeVer for ClientboundLogin {
+    fn decode_ver(ver: u32, src: &mut Bytes) -> Result<Self, ProtocolError> {
         let entity_id = i32::decode(src)?;
         let is_hardcore = bool::decode(src)?;
         let dimension_names = Vec::<String>::decode(src)?;
@@ -276,15 +276,12 @@ impl Decode for ClientboundLogin {
         let simulation_distance = VarInt::decode(src)?;
         let reduced_debug_info = bool::decode(src)?;
         let enable_respawn_screen = bool::decode(src)?;
-        // Heuristic: the field is presence-gated by proto version, but
-        // the decoder doesn't know the proto. Default to None when
-        // round-tripping — callers reconstructing 765+ frames must set
-        // this explicitly.
         let do_limited_crafting = None;
-        // Same caveat applies to `dimension_type` — round-trip defaults
-        // to the modern (VarInt) shape so the test suite stays
-        // symmetric with the modern encode path.
-        let dimension_type = DimensionTypeRef::Registry(VarInt::decode(src)?);
+        let dimension_type = if ver <= 765 {
+            DimensionTypeRef::Identifier(String::decode(src)?)
+        } else {
+            DimensionTypeRef::Registry(VarInt::decode(src)?)
+        };
         let dimension_name = String::decode(src)?;
         let hashed_seed = i64::decode(src)?;
         let game_mode = u8::decode(src)?;
@@ -297,9 +294,6 @@ impl Decode for ClientboundLogin {
             None
         };
         let portal_cooldown = VarInt::decode(src)?;
-        // Decoder lacks proto context; default to None for the
-        // pre-1.20.5 round-trip. 1.20.5/1.20.6 callers must
-        // populate this explicitly when reconstructing.
         let secure_profile = None;
         Ok(Self {
             entity_id,

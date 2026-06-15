@@ -21,9 +21,23 @@ pub struct ClusterCoordinator {
 
 impl ClusterCoordinator {
     pub fn new(discovery: Arc<ServiceDiscovery>, local_node_id: Uuid) -> Self {
-        let redis_url =
+        let raw_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
-        let redis_client = redis::Client::open(redis_url).ok();
+        let redis_url = if raw_url.starts_with("redis://") || raw_url.starts_with("rediss://") {
+            raw_url
+        } else {
+            tracing::warn!(
+                "REDIS_URL does not start with redis:// or rediss://, falling back to default"
+            );
+            "redis://127.0.0.1/".to_string()
+        };
+        let redis_client = match redis::Client::open(redis_url.clone()) {
+            Ok(client) => Some(client),
+            Err(e) => {
+                tracing::warn!("Failed to create Redis client for '{}': {}", redis_url, e);
+                None
+            },
+        };
 
         Self {
             discovery,

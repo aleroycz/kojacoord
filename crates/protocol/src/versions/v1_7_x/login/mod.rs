@@ -76,9 +76,15 @@ mod clientbound {
             VarInt(id_bytes.len() as i32).encode(dst)?;
             dst.put_slice(id_bytes);
 
+            if self.public_key.len() > i16::MAX as usize {
+                return Err(ProtocolError::UnexpectedEof);
+            }
             dst.put_i16(self.public_key.len() as i16);
             dst.put_slice(&self.public_key);
 
+            if self.verify_token.len() > i16::MAX as usize {
+                return Err(ProtocolError::UnexpectedEof);
+            }
             dst.put_i16(self.verify_token.len() as i16);
             dst.put_slice(&self.verify_token);
 
@@ -110,7 +116,11 @@ mod clientbound {
                     "Missing Short length for ClientboundEncryptionRequest public_key",
                 )));
             }
-            let key_len = src.get_i16() as usize;
+            let raw_key_len = src.get_i16();
+            if raw_key_len < 0 {
+                return Err(ProtocolError::UnexpectedEof);
+            }
+            let key_len = raw_key_len as usize;
             if src.remaining() < key_len {
                 return Err(ProtocolError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -126,7 +136,11 @@ mod clientbound {
                     "Missing Short length for ClientboundEncryptionRequest verify_token",
                 )));
             }
-            let tok_len = src.get_i16() as usize;
+            let raw_tok_len = src.get_i16();
+            if raw_tok_len < 0 {
+                return Err(ProtocolError::UnexpectedEof);
+            }
+            let tok_len = raw_tok_len as usize;
             if src.remaining() < tok_len {
                 return Err(ProtocolError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -273,13 +287,17 @@ mod serverbound {
         }
     }
 
-    // 1.7.x Encryption Response also uses Short(i16) length-prefixes for
-    // shared_secret and verify_token. Mojang switched to VarInt in 1.8.
     impl Encode for ServerboundEncryptionResponse {
         fn encode(&self, dst: &mut BytesMut) -> Result<(), ProtocolError> {
+            if self.shared_secret.len() > i16::MAX as usize {
+                return Err(ProtocolError::UnexpectedEof);
+            }
             dst.put_i16(self.shared_secret.len() as i16);
             dst.put_slice(&self.shared_secret);
 
+            if self.verify_token.len() > i16::MAX as usize {
+                return Err(ProtocolError::UnexpectedEof);
+            }
             dst.put_i16(self.verify_token.len() as i16);
             dst.put_slice(&self.verify_token);
 
@@ -295,7 +313,11 @@ mod serverbound {
                     "Missing Short length for ServerboundEncryptionResponse shared_secret",
                 )));
             }
-            let ss_len = src.get_i16() as usize;
+            let raw_ss_len = src.get_i16();
+            if raw_ss_len < 0 {
+                return Err(ProtocolError::UnexpectedEof);
+            }
+            let ss_len = raw_ss_len as usize;
             if src.remaining() < ss_len {
                 return Err(ProtocolError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -311,7 +333,11 @@ mod serverbound {
                     "Missing Short length for ServerboundEncryptionResponse verify_token",
                 )));
             }
-            let vt_len = src.get_i16() as usize;
+            let raw_vt_len = src.get_i16();
+            if raw_vt_len < 0 {
+                return Err(ProtocolError::UnexpectedEof);
+            }
+            let vt_len = raw_vt_len as usize;
             if src.remaining() < vt_len {
                 return Err(ProtocolError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,

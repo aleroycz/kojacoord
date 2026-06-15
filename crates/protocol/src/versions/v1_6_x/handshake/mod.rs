@@ -21,12 +21,16 @@ fn decode_legacy_string(src: &mut Bytes) -> Result<String, ProtocolError> {
     String::from_utf16(&chars).map_err(|_| ProtocolError::UnexpectedEof)
 }
 
-fn encode_legacy_string(s: &str, dst: &mut BytesMut) {
+fn encode_legacy_string(s: &str, dst: &mut BytesMut) -> Result<(), ProtocolError> {
     let utf16: Vec<u16> = s.encode_utf16().collect();
+    if utf16.len() > u16::MAX as usize {
+        return Err(ProtocolError::UnexpectedEof);
+    }
     dst.extend_from_slice(&(utf16.len() as u16).to_be_bytes());
     for ch in &utf16 {
         dst.extend_from_slice(&ch.to_be_bytes());
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,8 +50,8 @@ impl PacketId for ServerboundHandshake {
 impl Encode for ServerboundHandshake {
     fn encode(&self, dst: &mut BytesMut) -> Result<(), ProtocolError> {
         dst.put_u8(self.protocol_version);
-        encode_legacy_string(&self.username, dst);
-        encode_legacy_string(&self.host, dst);
+        encode_legacy_string(&self.username, dst)?;
+        encode_legacy_string(&self.host, dst)?;
         dst.put_i32(self.port);
         Ok(())
     }

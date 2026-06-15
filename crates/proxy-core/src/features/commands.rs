@@ -41,7 +41,7 @@ pub async fn handle_command(
         "server" | "servers" => handle_server(parts, session, state, send_message).await,
         "hub" | "lobby" | "spawn" => handle_hub(session, state, send_message).await,
         "glist" | "list" => handle_glist(state, send_message).await,
-        "alert" => handle_alert(parts, session, send_message).await,
+        "alert" => handle_alert(parts, session, state, send_message).await,
         "find" => handle_find(parts, state, send_message).await,
         "koja" | "kojacoord" => handle_koja(session, send_message).await,
         "register" => handle_register(session, state, send_message).await,
@@ -344,8 +344,18 @@ async fn handle_glist(
 async fn handle_alert(
     parts: Vec<&str>,
     session: SharedSession,
+    state: Arc<ProxyState>,
     send_message: &mut impl FnMut(String),
 ) -> CommandResult {
+    let rank = {
+        let s = session.read().await;
+        s.rank.clone()
+    };
+    if !state.roles.rank_has_permission(&rank, "command.alert") {
+        send_message("§cYou don't have permission to use that.".to_owned());
+        return CommandResult::Handled;
+    }
+
     let msg = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
     if msg.is_empty() {
         send_message("§cUsage: /alert <message>".to_owned());

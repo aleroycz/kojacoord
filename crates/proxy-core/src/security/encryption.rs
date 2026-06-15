@@ -15,6 +15,7 @@ use aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use chacha20poly1305::{ChaCha20Poly1305, XChaCha20Poly1305};
 use rand::{rngs::OsRng, RngCore};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Algorithm discriminant used by [`EncryptionManager`] to dispatch to
@@ -51,12 +52,13 @@ pub enum EncryptionAlgorithm {
 /// `key_id` for log correlation. `nonce` is carried alongside the key
 /// because AEAD callers usually need both available together; rotating
 /// the nonce per-message is the caller's responsibility.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct EncryptionKey {
     pub algorithm: EncryptionAlgorithm,
     pub key_data: Vec<u8>,
     pub key_id: String,
     pub nonce: Option<Vec<u8>>,
+    counter: AtomicU64,
 }
 
 impl EncryptionKey {
@@ -66,12 +68,20 @@ impl EncryptionKey {
             key_data,
             key_id,
             nonce: None,
+            counter: AtomicU64::new(0),
         }
     }
 
     pub fn with_nonce(mut self, nonce: Vec<u8>) -> Self {
         self.nonce = Some(nonce);
         self
+    }
+
+    pub fn derive_nonce(&self) -> Option<(Vec<u8>, u64)> {
+        let base = self.nonce.as_ref()?;
+        let ctr = self.counter.fetch_add(1, Ordering::Relaxed);
+        let derived = xor_nonce_with_counter(base, ctr);
+        Some((derived, ctr))
     }
 
     /// Mint a fresh random key (and nonce, for AEAD algorithms) from
@@ -119,6 +129,7 @@ impl EncryptionKey {
             key_data,
             key_id: uuid::Uuid::new_v4().to_string(),
             nonce,
+            counter: AtomicU64::new(0),
         })
     }
 }
@@ -127,6 +138,18 @@ impl EncryptionKey {
 /// implements. `key_size` / `nonce_size` are exposed so
 /// `EncryptionKey::generate` can produce correctly-sized random data
 /// without each cipher reimplementing the keygen path.
+fn xor_nonce_with_counter(base: &[u8], ctr: u64) -> Vec<u8> {
+    let ctr_bytes = ctr.to_le_bytes();
+    let mut derived = base.to_vec();
+    for (i, &b) in ctr_bytes.iter().enumerate() {
+        if i >= derived.len() {
+            break;
+        }
+        derived[i] ^= b;
+    }
+    derived
+}
+
 pub trait Cipher: Send + Sync {
     fn encrypt(&self, plaintext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, String>;
     fn decrypt(&self, ciphertext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, String>;
@@ -152,7 +175,7 @@ impl Cipher for Aes256GcmCipher {
             ));
         }
 
-        let nonce = key.nonce.as_ref().ok_or("Nonce required for AES-256-GCM")?;
+        let (nonce, ctr) = key.derive_nonce().ok_or("Nonce required for AES-256-GCM")?;
 
         if nonce.len() != 12 {
             return Err(format!(
@@ -165,12 +188,17 @@ impl Cipher for Aes256GcmCipher {
 
         let cipher_key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key.key_data);
         let cipher = Aes256Gcm::new(cipher_key);
-        let nonce = Nonce::from_slice(nonce);
+        let nonce = Nonce::from_slice(&nonce);
 
-        cipher
+        let ciphertext = cipher
             .encrypt(nonce, plaintext)
             .map(|c| c.to_vec())
-            .map_err(|e| format!("AES-256-GCM encryption failed: {}", e))
+            .map_err(|e| format!("AES-256-GCM encryption failed: {}", e))?;
+
+        let mut output = Vec::with_capacity(8 + ciphertext.len());
+        output.extend_from_slice(&ctr.to_le_bytes());
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
     }
 
     fn decrypt(&self, ciphertext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, String> {
@@ -185,23 +213,36 @@ impl Cipher for Aes256GcmCipher {
             ));
         }
 
-        let nonce = key.nonce.as_ref().ok_or("Nonce required for AES-256-GCM")?;
+        let base = key.nonce.as_ref().ok_or("Nonce required for AES-256-GCM")?;
 
-        if nonce.len() != 12 {
+        if base.len() != 12 {
             return Err(format!(
                 "Invalid nonce size for AES-256-GCM: expected 12, got {}",
-                nonce.len()
+                base.len()
             ));
         }
 
-        tracing::debug!(len = ciphertext.len(), "AES-256-GCM decrypt");
+        if ciphertext.len() < 8 {
+            return Err("Ciphertext too short: missing counter prefix".into());
+        }
+
+        let ctr = u64::from_le_bytes(
+            ciphertext[..8]
+                .try_into()
+                .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
+        );
+        let payload = &ciphertext[8..];
+
+        let nonce = xor_nonce_with_counter(base, ctr);
+
+        tracing::debug!(len = payload.len(), "AES-256-GCM decrypt");
 
         let cipher_key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key.key_data);
         let cipher = Aes256Gcm::new(cipher_key);
-        let nonce = Nonce::from_slice(nonce);
+        let nonce = Nonce::from_slice(&nonce);
 
         cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(nonce, payload)
             .map_err(|e| format!("AES-256-GCM decryption failed: {}", e))
     }
 
@@ -235,9 +276,8 @@ impl Cipher for ChaCha20Poly1305Cipher {
             ));
         }
 
-        let nonce = key
-            .nonce
-            .as_ref()
+        let (nonce, ctr) = key
+            .derive_nonce()
             .ok_or("Nonce required for ChaCha20-Poly1305")?;
 
         if nonce.len() != 12 {
@@ -251,12 +291,17 @@ impl Cipher for ChaCha20Poly1305Cipher {
 
         let cipher_key = chacha20poly1305::Key::from_slice(&key.key_data);
         let cipher = ChaCha20Poly1305::new(cipher_key);
-        let nonce = chacha20poly1305::Nonce::from_slice(nonce);
+        let nonce = chacha20poly1305::Nonce::from_slice(&nonce);
 
-        cipher
+        let ciphertext = cipher
             .encrypt(nonce, plaintext)
             .map(|c| c.to_vec())
-            .map_err(|e| format!("ChaCha20-Poly1305 encryption failed: {}", e))
+            .map_err(|e| format!("ChaCha20-Poly1305 encryption failed: {}", e))?;
+
+        let mut output = Vec::with_capacity(8 + ciphertext.len());
+        output.extend_from_slice(&ctr.to_le_bytes());
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
     }
 
     fn decrypt(&self, ciphertext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, String> {
@@ -271,26 +316,39 @@ impl Cipher for ChaCha20Poly1305Cipher {
             ));
         }
 
-        let nonce = key
+        let base = key
             .nonce
             .as_ref()
             .ok_or("Nonce required for ChaCha20-Poly1305")?;
 
-        if nonce.len() != 12 {
+        if base.len() != 12 {
             return Err(format!(
                 "Invalid nonce size for ChaCha20-Poly1305: expected 12, got {}",
-                nonce.len()
+                base.len()
             ));
         }
 
-        tracing::debug!(len = ciphertext.len(), "ChaCha20-Poly1305 decrypt");
+        if ciphertext.len() < 8 {
+            return Err("Ciphertext too short: missing counter prefix".into());
+        }
+
+        let ctr = u64::from_le_bytes(
+            ciphertext[..8]
+                .try_into()
+                .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
+        );
+        let payload = &ciphertext[8..];
+
+        let nonce = xor_nonce_with_counter(base, ctr);
+
+        tracing::debug!(len = payload.len(), "ChaCha20-Poly1305 decrypt");
 
         let cipher_key = chacha20poly1305::Key::from_slice(&key.key_data);
         let cipher = ChaCha20Poly1305::new(cipher_key);
-        let nonce = chacha20poly1305::Nonce::from_slice(nonce);
+        let nonce = chacha20poly1305::Nonce::from_slice(&nonce);
 
         cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(nonce, payload)
             .map_err(|e| format!("ChaCha20-Poly1305 decryption failed: {}", e))
     }
 
@@ -325,9 +383,8 @@ impl Cipher for XChaCha20Poly1305Cipher {
             ));
         }
 
-        let nonce = key
-            .nonce
-            .as_ref()
+        let (nonce, ctr) = key
+            .derive_nonce()
             .ok_or("Nonce required for XChaCha20-Poly1305")?;
 
         if nonce.len() != 24 {
@@ -341,12 +398,17 @@ impl Cipher for XChaCha20Poly1305Cipher {
 
         let cipher_key = chacha20poly1305::Key::from_slice(&key.key_data);
         let cipher = XChaCha20Poly1305::new(cipher_key);
-        let nonce = chacha20poly1305::XNonce::from_slice(nonce);
+        let nonce = chacha20poly1305::XNonce::from_slice(&nonce);
 
-        cipher
+        let ciphertext = cipher
             .encrypt(nonce, plaintext)
             .map(|c| c.to_vec())
-            .map_err(|e| format!("XChaCha20-Poly1305 encryption failed: {}", e))
+            .map_err(|e| format!("XChaCha20-Poly1305 encryption failed: {}", e))?;
+
+        let mut output = Vec::with_capacity(8 + ciphertext.len());
+        output.extend_from_slice(&ctr.to_le_bytes());
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
     }
 
     fn decrypt(&self, ciphertext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, String> {
@@ -361,26 +423,39 @@ impl Cipher for XChaCha20Poly1305Cipher {
             ));
         }
 
-        let nonce = key
+        let base = key
             .nonce
             .as_ref()
             .ok_or("Nonce required for XChaCha20-Poly1305")?;
 
-        if nonce.len() != 24 {
+        if base.len() != 24 {
             return Err(format!(
                 "Invalid nonce size for XChaCha20-Poly1305: expected 24, got {}",
-                nonce.len()
+                base.len()
             ));
         }
 
-        tracing::debug!(len = ciphertext.len(), "XChaCha20-Poly1305 decrypt");
+        if ciphertext.len() < 8 {
+            return Err("Ciphertext too short: missing counter prefix".into());
+        }
+
+        let ctr = u64::from_le_bytes(
+            ciphertext[..8]
+                .try_into()
+                .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
+        );
+        let payload = &ciphertext[8..];
+
+        let nonce = xor_nonce_with_counter(base, ctr);
+
+        tracing::debug!(len = payload.len(), "XChaCha20-Poly1305 decrypt");
 
         let cipher_key = chacha20poly1305::Key::from_slice(&key.key_data);
         let cipher = XChaCha20Poly1305::new(cipher_key);
-        let nonce = chacha20poly1305::XNonce::from_slice(nonce);
+        let nonce = chacha20poly1305::XNonce::from_slice(&nonce);
 
         cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(nonce, payload)
             .map_err(|e| format!("XChaCha20-Poly1305 decryption failed: {}", e))
     }
 
@@ -406,6 +481,7 @@ impl Cipher for XChaCha20Poly1305Cipher {
 /// before exposing this anywhere user-reachable.
 pub struct PostQuantumKemCipher;
 
+#[cfg(feature = "insecure-post-quantum")]
 impl Cipher for PostQuantumKemCipher {
     fn encrypt(&self, plaintext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, String> {
         if key.algorithm != EncryptionAlgorithm::PostQuantumKem {
@@ -483,6 +559,7 @@ impl EncryptionManager {
             EncryptionAlgorithm::XChaCha20Poly1305,
             Arc::new(XChaCha20Poly1305Cipher) as Arc<dyn Cipher>,
         );
+        #[cfg(feature = "insecure-post-quantum")]
         ciphers.insert(
             EncryptionAlgorithm::PostQuantumKem,
             Arc::new(PostQuantumKemCipher) as Arc<dyn Cipher>,
@@ -611,6 +688,7 @@ mod tests {
         assert_ne!(encrypted, plaintext);
     }
 
+    #[cfg(feature = "insecure-post-quantum")]
     #[test]
     fn post_quantum_kem_encryption() {
         let manager = EncryptionManager::new();

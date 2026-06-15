@@ -302,7 +302,10 @@ mod tests {
                     packets.len()
                 );
                 let last = &packets[packets.len() - 1];
-                assert_eq!(last[0], 0x03, "last packet should be FinishConfiguration (0x03)");
+                assert_eq!(
+                    last[0], 0x03,
+                    "last packet should be FinishConfiguration (0x03)"
+                );
             },
             other => panic!("expected InjectS2C, got {:?}", other_label(&other)),
         }

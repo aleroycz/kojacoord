@@ -10,10 +10,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
+use uuid::Uuid;
 
 use crate::proxy::ProxyState;
 
 const PING_TIMEOUT: Duration = Duration::from_millis(500);
+const SERVERLIST_COOLDOWN: Duration = Duration::from_secs(5);
+const SERVERLIST_COOLDOWN_MAX_ENTRIES: usize = 10000;
 
 pub const CHANNEL_SERVERLIST_MODERN: &str = "kojacoord:serverlist";
 pub const CHANNEL_SERVERLIST_LEGACY: &str = "KOJACRD|SERVERS";
@@ -46,7 +49,21 @@ pub fn is_modpack_channel(channel: &str) -> bool {
     channel == CHANNEL_MODPACK_MODERN || channel == CHANNEL_MODPACK_LEGACY
 }
 
-pub async fn build_serverlist_payload(state: &Arc<ProxyState>) -> Vec<u8> {
+pub async fn build_serverlist_payload(state: &Arc<ProxyState>, player_uuid: Uuid) -> Vec<u8> {
+    {
+        let map = &state.serverlist_cooldown;
+        let now = Instant::now();
+        if let Some(entry) = map.get(&player_uuid) {
+            if now.duration_since(*entry) < SERVERLIST_COOLDOWN {
+                return b"[]".to_vec();
+            }
+        }
+        if map.len() >= SERVERLIST_COOLDOWN_MAX_ENTRIES {
+            map.retain(|_, t| now.duration_since(*t) < SERVERLIST_COOLDOWN);
+        }
+        map.insert(player_uuid, now);
+    }
+
     let servers = state.server_registry.all();
 
     let ping_handles: Vec<_> = servers

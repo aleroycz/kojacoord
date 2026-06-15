@@ -61,6 +61,12 @@ impl ChannelHandler for CompressionHandler {
             return Ok(Some(cursor));
         }
 
+        const MAX_UNCOMPRESSED: usize = 32 * 1024 * 1024;
+
+        if data_len < 0 || (data_len as usize) > MAX_UNCOMPRESSED {
+            return Err(super::error::HandlerError::InvalidDataLength(data_len));
+        }
+
         let mut decoder = ZlibDecoder::new(cursor.as_ref());
         let mut decompressed = Vec::with_capacity(data_len as usize);
         decoder

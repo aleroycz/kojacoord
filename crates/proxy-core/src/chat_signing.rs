@@ -125,9 +125,12 @@ pub fn strip_chat_signature(payload: &[u8], protocol_version: u32) -> Result<Vec
     if has_signature_bytes {
         let len = i32::decode(&mut src)
             .map_err(|e| format!("Failed to decode signature length: {}", e))?;
-        // Skip signature bytes
         if len > 0 {
-            let _ = src.split_to(len as usize);
+            let len_usize = len as usize;
+            if len_usize > src.remaining() {
+                return Err("signature byte length exceeds remaining buffer".into());
+            }
+            let _ = src.split_to(len_usize);
         }
     }
 

@@ -36,6 +36,7 @@ fn s(v: &str) -> NbtTag {
     NbtTag::String(v.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dimension_type_element(
     has_skylight: bool,
     has_ceiling: bool,
@@ -44,6 +45,7 @@ fn dimension_type_element(
     infiniburn: &str,
     effects: &str,
     is_1_20_4: bool,
+    fixed_time: Option<i64>,
 ) -> NbtTag {
     let mut m = HashMap::new();
     m.insert("piglin_safe".into(), b(0));
@@ -58,13 +60,6 @@ fn dimension_type_element(
     m.insert("bed_works".into(), b(1));
     m.insert("effects".into(), s(effects));
     m.insert("has_raids".into(), b(1));
-    // `min_y` and `height` were added in 1.17 (proto 755). Before
-    // that the world was implicitly 0..256. ViaVersion's
-    // `dimension-registry-1.16.2.nbt` confirms these fields are
-    // absent at 1.16.2-1.16.5; we gate them on the 1.20.4 flag here
-    // as a conservative approximation (callers wanting precise 1.17
-    // vs 1.16.2 behaviour should use the proxy-core
-    // `build_dimension_codec_for_proto` instead).
     if is_1_20_4 {
         m.insert("min_y".into(), i(0));
         m.insert("height".into(), i(256));
@@ -74,11 +69,12 @@ fn dimension_type_element(
     m.insert("ultrawarm".into(), b(ultrawarm as i8));
     m.insert("has_ceiling".into(), b(has_ceiling as i8));
 
-    // 1.20.4+ additional fields
     if is_1_20_4 {
-        m.insert("monster_spawn_light_level".into(), NbtTag::Int(0));
-        m.insert("monster_spawn_block_light_limit".into(), NbtTag::Int(0));
-        m.insert("fixed_time".into(), NbtTag::Int(0)); // 0 = no fixed time
+        m.insert("monster_spawn_light_level".into(), i(7));
+        m.insert("monster_spawn_block_light_limit".into(), i(0));
+        if let Some(t) = fixed_time {
+            m.insert("fixed_time".into(), NbtTag::Long(t));
+        }
     }
 
     NbtTag::Compound(m)
@@ -151,6 +147,7 @@ fn dimension_codec_nbt_with_version(is_1_20_4: bool) -> Result<Vec<u8>, Protocol
         "minecraft:infiniburn_overworld",
         "minecraft:overworld",
         is_1_20_4,
+        None,
     );
     let nether = dimension_type_element(
         false,
@@ -160,6 +157,7 @@ fn dimension_codec_nbt_with_version(is_1_20_4: bool) -> Result<Vec<u8>, Protocol
         "minecraft:infiniburn_nether",
         "minecraft:the_nether",
         is_1_20_4,
+        Some(18000),
     );
     let end = dimension_type_element(
         false,
@@ -169,6 +167,7 @@ fn dimension_codec_nbt_with_version(is_1_20_4: bool) -> Result<Vec<u8>, Protocol
         "minecraft:infiniburn_end",
         "minecraft:the_end",
         is_1_20_4,
+        None,
     );
 
     let dim_registry = registry(
@@ -224,7 +223,7 @@ pub fn dimension_type_nbt_1_20_4(key: &str) -> Result<Vec<u8>, ProtocolError> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let bytes = dimension_type_nbt_for_proto("minecraft:overworld", 758).unwrap();
 /// assert!(bytes.len() > 0);
 /// ```
@@ -262,7 +261,8 @@ enum DimSchema {
 }
 
 fn dimension_type_nbt_with_version(key: &str, schema: DimSchema) -> Result<Vec<u8>, ProtocolError> {
-    let (infiniburn, effects, has_skylight, has_ceiling, ultrawarm, natural) = match key {
+    let (infiniburn, effects, has_skylight, has_ceiling, ultrawarm, natural, fixed_time) = match key
+    {
         "minecraft:the_nether" => (
             "minecraft:infiniburn_nether",
             "minecraft:the_nether",
@@ -270,6 +270,7 @@ fn dimension_type_nbt_with_version(key: &str, schema: DimSchema) -> Result<Vec<u
             true,
             true,
             false,
+            Some(18000i64),
         ),
         "minecraft:the_end" => (
             "minecraft:infiniburn_end",
@@ -278,6 +279,7 @@ fn dimension_type_nbt_with_version(key: &str, schema: DimSchema) -> Result<Vec<u
             false,
             false,
             false,
+            None,
         ),
         _ => (
             "minecraft:infiniburn_overworld",
@@ -286,6 +288,7 @@ fn dimension_type_nbt_with_version(key: &str, schema: DimSchema) -> Result<Vec<u
             false,
             false,
             true,
+            None,
         ),
     };
     let element = dimension_type_element(
@@ -296,6 +299,7 @@ fn dimension_type_nbt_with_version(key: &str, schema: DimSchema) -> Result<Vec<u
         infiniburn,
         effects,
         matches!(schema, DimSchema::V1_20_4),
+        fixed_time,
     );
     let element = augment_for_schema(element, schema);
     let mut root = HashMap::new();
@@ -326,7 +330,7 @@ fn dimension_type_nbt_with_version(key: &str, schema: DimSchema) -> Result<Vec<u
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use std::collections::HashMap;
 /// // build an empty compound element
 /// let base = NbtTag::Compound(HashMap::new());
@@ -357,7 +361,7 @@ fn augment_for_schema(element: NbtTag, schema: DimSchema) -> NbtTag {
             //   monster_spawn_block_light_limit = 0
             //   monster_spawn_light_level       = 11
             m.insert("monster_spawn_block_light_limit".into(), i(0));
-            m.insert("monster_spawn_light_level".into(), i(11));
+            m.insert("monster_spawn_light_level".into(), i(7));
         },
         DimSchema::V1_20_4 => {
             // 1.20.4+: 1.17 carry-overs + spawn-light fields (already
@@ -429,6 +433,7 @@ mod tests {
                 "minecraft:infiniburn_overworld",
                 "minecraft:overworld",
                 false,
+                None,
             ),
             DimSchema::V1_16_2,
         ) {

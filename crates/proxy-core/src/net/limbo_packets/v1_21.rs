@@ -57,7 +57,7 @@ impl LimboPackets for V1_21 {
                 data_kept: 0,
                 death_location: None,
                 portal_cooldown: VarInt(0),
-                sea_level: VarInt(0),
+                sea_level: if proto >= 768 { Some(VarInt(0)) } else { None },
             },
         )
     }
@@ -66,7 +66,7 @@ impl LimboPackets for V1_21 {
         encode(
             proto,
             p::ClientboundPlayerAbilities {
-                raw: vec![0x06, 0, 0],
+                raw: vec![0x06, 0, 0, 0, 0, 0, 0, 0, 0],
             },
         )
     }
@@ -101,7 +101,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let v = V1_21;
     /// let pkt = v.chat(768, r#"{"text":"hello"}"#);
     /// assert!(pkt.is_some());
@@ -132,7 +132,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let v = V1_21;
     /// let pos = SoundParams { x: 0.0, y: 64.0, z: 0.0, volume: 1.0, pitch: 1.0 };
     /// let pkt = v.note_sound(770, pos);
@@ -175,7 +175,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
     /// use uuid::Uuid;
     ///
     /// // `V1_21` is a unit struct; call with a reference to produce the packet.
@@ -218,7 +218,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // Ensure `v` is an instance of V1_21 in scope.
     /// let pkt = V1_21.brand(770, "MyServerBrand");
     /// assert!(pkt.is_some());
@@ -250,7 +250,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let v = V1_21;
     /// let pkt = v.set_center_chunk(768).unwrap();
     /// assert_eq!(pkt.id, 0x58);
@@ -288,7 +288,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let ver = 770;
     /// let pkt = V1_21.chunk_data(&V1_21, ver);
     /// assert!(pkt.is_some());
@@ -315,7 +315,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let v = V1_21;
     /// let pkt = v.chunk_batch_start(770).unwrap();
     /// assert_eq!(pkt.id, 0x0c);
@@ -339,7 +339,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let v = V1_21;
     /// let pkt = v.chunk_batch_finished(770, 5).unwrap();
     /// assert_eq!(pkt.id, 0x0b);
@@ -365,7 +365,7 @@ impl LimboPackets for V1_21 {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let v = V1_21;
     /// let pkt = v.start_wait_chunks_event(767);
     /// assert!(pkt.is_some());

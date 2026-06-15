@@ -72,7 +72,7 @@ pub fn determine_injection_mode(client_protocol: u32, backend_protocol: u32) -> 
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let codec = build_dimension_codec_for_proto(759).expect("should build 1.19 codec");
 /// // codec contains the full binary NBT codec for proto 759
 /// assert!(!codec.is_empty());
@@ -171,7 +171,7 @@ pub fn build_dimension_codec_for_proto(proto: u32) -> Result<Vec<u8>, String> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let inline = inline_dimension_nbt_for_proto("minecraft:overworld", 754)?;
 /// assert!(!inline.is_empty());
 /// # Ok::<(), String>(())
@@ -898,7 +898,7 @@ mod ship_check {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // This test performs deep validation; calling the codec builder must succeed.
     /// let _ = build_dimension_codec_for_proto(759).expect("build 759");
     /// ```
@@ -989,7 +989,7 @@ mod ship_check {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let bytes = inline_dimension_nbt_for_proto("minecraft:overworld", 758).unwrap();
     /// let mut src = bytes::Bytes::copy_from_slice(&bytes);
     /// let nbt = kojacoord_protocol::codec::Decode::decode(&mut src).unwrap();

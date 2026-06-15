@@ -176,10 +176,9 @@ static PARSED: Lazy<ParsedTables> = Lazy::new(|| {
     let mut items_m2l = HashMap::new();
     let mut item_names: HashMap<LegacyItemId, &'static str> = HashMap::new();
     if let Some([start, end]) = items.identity_range {
-        for i in start..=end {
-            if i < i16::MIN as i32 || i > i16::MAX as i32 {
-                continue;
-            }
+        let lo = start.max(i16::MIN as i32);
+        let hi = end.min(i16::MAX as i32);
+        for i in lo..=hi {
             let l = i as i16;
             let m = i as u32;
             items_l2m.insert(l, m);

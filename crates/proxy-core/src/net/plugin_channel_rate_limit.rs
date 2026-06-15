@@ -12,6 +12,7 @@ use uuid::Uuid;
 /// Default rate limit: 10 messages per second per player.
 const DEFAULT_MESSAGES_PER_SECOND: f32 = 10.0;
 const BURST_CAPACITY: f32 = 20.0;
+const MAX_RATE_LIMIT_RECORDS: usize = 100_000;
 
 #[derive(Debug)]
 struct PlayerRateLimit {
@@ -45,6 +46,21 @@ impl PluginChannelRateLimiter {
     pub async fn check(&self, player_uuid: Uuid) -> bool {
         let mut map = self.records.lock().await;
         let now = Instant::now();
+
+        if !map.contains_key(&player_uuid) && map.len() >= MAX_RATE_LIMIT_RECORDS {
+            let now_snapshot = now;
+            map.retain(|_, rec| {
+                let not_full = rec.tokens < BURST_CAPACITY;
+                let recent = now_snapshot.duration_since(rec.last_update) < Duration::from_secs(60);
+                not_full || recent
+            });
+            if map.len() >= MAX_RATE_LIMIT_RECORDS {
+                tracing::warn!(
+                    "plugin_channel_rate_limit: records at capacity ({MAX_RATE_LIMIT_RECORDS}), rate-limiting new player"
+                );
+                return false;
+            }
+        }
 
         let rec = map.entry(player_uuid).or_insert_with(|| PlayerRateLimit {
             tokens: BURST_CAPACITY,

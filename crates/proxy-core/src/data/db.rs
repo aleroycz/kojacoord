@@ -59,6 +59,16 @@ impl Db {
             .await?;
 
         sqlx::query(
+            "CREATE TABLE IF NOT EXISTS offline_uuids (
+                username VARCHAR(32) NOT NULL PRIMARY KEY,
+                uuid VARCHAR(36) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS pending_purchases (
                 id INTEGER PRIMARY KEY AUTO_INCREMENT,
                 username TEXT NOT NULL,

@@ -26,6 +26,7 @@ figment = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 toml_edit = "0.22"
+ipnet = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

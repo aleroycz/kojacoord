@@ -11,6 +11,7 @@
 
 #![deny(clippy::all)]
 
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -123,6 +124,9 @@ pub struct ProxySection {
     #[serde(default)]
     pub proxy_protocol_optional: bool,
 
+    #[serde(default)]
+    pub trusted_proxies: Vec<IpNet>,
+
     #[serde(default = "default_session_timeout")]
     pub session_timeout_secs: u64,
 
@@ -190,6 +194,7 @@ impl Default for ProxySection {
             prevent_proxy_connections: false,
             proxy_protocol: default_proxy_protocol(),
             proxy_protocol_optional: false,
+            trusted_proxies: Vec::new(),
             session_timeout_secs: default_session_timeout(),
             resource_pack_url: None,
             resource_pack_hash: None,
@@ -848,6 +853,16 @@ impl ProxyConfig {
                  only accept connections from this proxy (firewall them), otherwise players can \
                  spoof identities. Prefer Velocity modern forwarding with a strong secret."
             );
+        }
+
+        if self.grpc_control_plane.enabled && self.grpc_control_plane.auth_enabled {
+            match &self.grpc_control_plane.auth_token {
+                Some(token) => validate_secret("grpc_control_plane.auth_token", token)?,
+                None => anyhow::bail!(
+                    "grpc_control_plane.auth_token is not set; \
+                     set a unique, randomly generated value when auth is enabled."
+                ),
+            }
         }
 
         Ok(())

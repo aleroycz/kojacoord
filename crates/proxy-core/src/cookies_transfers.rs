@@ -25,8 +25,20 @@ pub struct CookieStore {
     cookies: std::collections::HashMap<String, Vec<u8>>,
 }
 
+const MAX_COOKIE_STORE_SIZE: usize = 1024;
+const MAX_COOKIE_DATA_SIZE: usize = 4096;
+
 impl CookieStore {
     pub fn store(&mut self, key: String, data: Vec<u8>) {
+        if data.len() > MAX_COOKIE_DATA_SIZE {
+            tracing::warn!(key = %key, size = data.len(), "cookie data exceeds per-entry size limit, dropping");
+            return;
+        }
+        if self.cookies.len() >= MAX_COOKIE_STORE_SIZE && !self.cookies.contains_key(&key) {
+            if let Some(oldest_key) = self.cookies.keys().next().cloned() {
+                self.cookies.remove(&oldest_key);
+            }
+        }
         self.cookies.insert(key, data);
     }
 

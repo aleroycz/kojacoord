@@ -207,6 +207,7 @@ pub fn convert_set_slot_legacy_to_modern(body: &mut BytesMut) -> Result<(), Stri
 /// Reverse of [`convert_set_slot_legacy_to_modern`]: rewrite a modern
 /// `SetSlot` body into the legacy shape so a pre-1.13 backend can
 /// parse what a 1.13+ client sent.
+#[allow(dead_code)]
 pub fn convert_set_slot_modern_to_legacy(body: &mut BytesMut) -> Result<(), String> {
     let window_id = body.get_u8();
     let slot = body.get_i16();
@@ -222,11 +223,10 @@ pub fn convert_set_slot_modern_to_legacy(body: &mut BytesMut) -> Result<(), Stri
     body.put_u8(window_id);
     body.put_i16(slot);
     match legacy_slot.0 {
-        None => body.put_u8(0),
+        None => body.put_i16(-1),
         Some(data) => {
-            body.put_u8(1);
             body.put_i16(data.item_id);
-            body.put_u8(data.count as u8);
+            body.put_i8(data.count);
             body.put_i16(data.damage);
             match &data.nbt {
                 None => VarInt(0).encode(body).map_err(|e| e.to_string())?,

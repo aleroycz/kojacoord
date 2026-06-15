@@ -4,6 +4,10 @@
 //! they update the wrong one rather than silently dropping samples.
 
 use prometheus::{Counter, CounterVec, Gauge, GaugeVec, Histogram, Registry};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+
+const LABEL_CARDINALITY_CAP: usize = 1000;
 
 pub struct MetricsCollector {
     registry: Registry,
@@ -26,6 +30,8 @@ pub struct MetricsCollector {
     server_status: GaugeVec,
 
     errors_total: CounterVec,
+
+    label_cardinality: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl MetricsCollector {
@@ -161,13 +167,39 @@ impl MetricsCollector {
             server_player_count,
             server_status,
             errors_total,
+            label_cardinality: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn sanitize_label(&self, metric: &str, value: &str) -> String {
+        let mut map = self.label_cardinality.lock().unwrap();
+        let seen = map.entry(metric.to_string()).or_default();
+        if seen.contains(value) {
+            return value.to_string();
+        }
+        if seen.len() >= LABEL_CARDINALITY_CAP {
+            return "__other__".to_string();
+        }
+        let sanitized: String = value
+            .chars()
+            .take(64)
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        seen.insert(sanitized.clone());
+        sanitized
     }
 
     pub fn record_connection(&self, protocol_version: &str) {
         self.connections_total.inc();
+        let label = self.sanitize_label("protocol_version", protocol_version);
         self.connections_by_protocol
-            .with_label_values(&[protocol_version])
+            .with_label_values(&[&label])
             .inc();
         self.connections_active.inc();
     }
@@ -195,25 +227,27 @@ impl MetricsCollector {
 
     pub fn record_violation(&self, check_name: &str, severity: &str) {
         self.violations_total.with_label_values(&[severity]).inc();
-        self.violations_by_check
-            .with_label_values(&[check_name])
-            .inc();
+        let label = self.sanitize_label("check_name", check_name);
+        self.violations_by_check.with_label_values(&[&label]).inc();
     }
 
     pub fn set_server_player_count(&self, server_name: &str, count: usize) {
+        let label = self.sanitize_label("server_name", server_name);
         self.server_player_count
-            .with_label_values(&[server_name])
+            .with_label_values(&[&label])
             .set(count as f64);
     }
 
     pub fn set_server_status(&self, server_name: &str, online: bool) {
+        let label = self.sanitize_label("server_name", server_name);
         self.server_status
-            .with_label_values(&[server_name])
+            .with_label_values(&[&label])
             .set(if online { 1.0 } else { 0.0 });
     }
 
     pub fn record_error(&self, error_type: &str) {
-        self.errors_total.with_label_values(&[error_type]).inc();
+        let label = self.sanitize_label("error_type", error_type);
+        self.errors_total.with_label_values(&[&label]).inc();
     }
 
     pub fn get_registry(&self) -> &Registry {

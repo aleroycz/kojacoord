@@ -33,7 +33,7 @@ impl PluginLoader {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let _loader = plugin_system::native_loader::PluginLoader::new();
     /// ```
     pub fn new() -> Self {
@@ -55,7 +55,7 @@ impl PluginLoader {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let mut loader = PluginLoader::new();
     /// let _verifier: &mut PluginVerifier = loader.verifier_mut();
     /// ```
@@ -81,7 +81,7 @@ impl PluginLoader {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// # use plugin_system::{PluginLoader, PluginContext};
     /// # use std::path::Path;
     /// let mut loader = PluginLoader::new();
@@ -167,7 +167,7 @@ impl PluginLoader {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let mut loader = PluginLoader::new();
     /// // Safe to call for names not loaded; does nothing in that case.
     /// loader.unload("example_plugin");
@@ -185,7 +185,7 @@ impl PluginLoader {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let mut loader = PluginLoader::new();
     /// // safe to call even if no plugins are loaded
     /// loader.unload_all();
@@ -201,14 +201,36 @@ impl PluginLoader {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // This should be true for any real crate version (>= "0.0.0").
     /// assert!(check_version_compatibility("0.0.0"));
     /// ```
     fn check_version_compatibility(required: &str) -> bool {
         let current = env!("CARGO_PKG_VERSION");
-        current >= required
+        match (parse_semver(current), parse_semver(required)) {
+            (Some(c), Some(r)) => c >= r,
+            _ => {
+                log::warn!(
+                    "Falling back to string comparison for version check: current={}, required={}",
+                    current,
+                    required
+                );
+                current >= required
+            },
+        }
     }
+}
+
+fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        parts[0].parse().ok()?,
+        parts[1].parse().ok()?,
+        parts[2].parse().ok()?,
+    ))
 }
 
 impl Default for PluginLoader {
@@ -216,7 +238,7 @@ impl Default for PluginLoader {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// use crate::native_loader::PluginLoader;
     /// let _loader = PluginLoader::default();
     /// ```

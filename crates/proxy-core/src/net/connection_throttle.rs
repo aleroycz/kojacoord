@@ -20,6 +20,8 @@ const DEFAULT_MAX_CONNECTIONS_PER_IP: u32 = 8;
 const REFILL_RATE_PER_SEC: f32 = 2.0;
 const CAPACITY: f32 = 8.0;
 const TEMP_BAN_DURATION: Duration = Duration::from_secs(120);
+const MAX_IP_RECORDS: usize = 1_000_000;
+const MAX_ASN_RECORDS: usize = 100_000;
 
 /// New connections allowed per ASN before a temporary ban.
 /// Default tuned to tolerate large networks; operators
@@ -100,6 +102,22 @@ impl ConnectionThrottle {
         let mut map = self.ip_records.lock().await;
         let now = Instant::now();
 
+        if !map.contains_key(&ip) && map.len() >= MAX_IP_RECORDS {
+            let now_snapshot = now;
+            map.retain(|_, rec| {
+                let active = rec.banned_until.is_some_and(|u| now_snapshot < u);
+                let not_full = rec.tokens < CAPACITY;
+                let recent = now_snapshot.duration_since(rec.last_update) < Duration::from_secs(10);
+                active || not_full || recent
+            });
+            if map.len() >= MAX_IP_RECORDS {
+                tracing::warn!(
+                    "connection_throttle: IP records at capacity ({MAX_IP_RECORDS}), dropping new IP"
+                );
+                return Err("too many connections from IP");
+            }
+        }
+
         let rec = map.entry(ip).or_insert_with(|| IpRecord {
             tokens: CAPACITY,
             last_update: now,
@@ -132,6 +150,22 @@ impl ConnectionThrottle {
     async fn check_asn(&self, asn: u32) -> Result<(), &'static str> {
         let mut map = self.asn_records.lock().await;
         let now = Instant::now();
+
+        if !map.contains_key(&asn) && map.len() >= MAX_ASN_RECORDS {
+            let now_snapshot = now;
+            map.retain(|_, rec| {
+                let active = rec.banned_until.is_some_and(|u| now_snapshot < u);
+                let not_full = rec.tokens < ASN_CAPACITY;
+                let recent = now_snapshot.duration_since(rec.last_update) < Duration::from_secs(30);
+                active || not_full || recent
+            });
+            if map.len() >= MAX_ASN_RECORDS {
+                tracing::warn!(
+                    "connection_throttle: ASN records at capacity ({MAX_ASN_RECORDS}), dropping new ASN"
+                );
+                return Err("too many connections from ASN");
+            }
+        }
 
         let rec = map.entry(asn).or_insert_with(|| AsnRecord {
             tokens: ASN_CAPACITY,

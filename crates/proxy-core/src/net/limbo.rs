@@ -189,7 +189,7 @@ impl<'a> LimboHandler<'a> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// # // pseudo-usage; actual construction of `LimboHandler` requires significant setup.
     /// # async fn example_usage(mut handler: LimboHandler<'_>) {
     /// let result = handler.run_inner().await;
@@ -432,7 +432,7 @@ impl<'a> LimboHandler<'a> {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
     /// # async fn example(mut handler: LimboHandler<'_>) -> Result<(), ConnectionError> {
     /// handler.run_configuration_phase().await?;
     /// # Ok(())

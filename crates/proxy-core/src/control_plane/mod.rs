@@ -306,11 +306,41 @@ impl Default for ControlPlaneState {
 #[derive(Clone)]
 pub struct GrpcControlPlane {
     state: Arc<ControlPlaneState>,
+    auth_enabled: bool,
+    auth_token: Option<String>,
 }
 
 impl GrpcControlPlane {
-    pub fn new(state: Arc<ControlPlaneState>) -> Self {
-        Self { state }
+    pub fn new(
+        state: Arc<ControlPlaneState>,
+        auth_enabled: bool,
+        auth_token: Option<String>,
+    ) -> Self {
+        Self {
+            state,
+            auth_enabled,
+            auth_token,
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn check_auth(&self, request: &tonic::Request<impl Send>) -> Result<(), Status> {
+        if !self.auth_enabled {
+            return Ok(());
+        }
+        let token = match &self.auth_token {
+            Some(t) => t,
+            None => return Err(Status::permission_denied("auth token not configured")),
+        };
+        let metadata = request.metadata();
+        let auth_val = metadata
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match auth_val {
+            Some(t) if crate::services::constant_time_eq(t.as_bytes(), token.as_bytes()) => Ok(()),
+            _ => Err(Status::permission_denied("invalid or missing auth token")),
+        }
     }
 }
 
@@ -320,6 +350,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<GetServersRequest>,
     ) -> Result<Response<GetServersResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let servers = self.state.list_servers().await;
 
@@ -351,6 +382,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<AddServerRequest>,
     ) -> Result<Response<AddServerResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let server = req
             .server
@@ -368,6 +400,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<RemoveServerRequest>,
     ) -> Result<Response<RemoveServerResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
 
         match self.state.remove_server(&req.name).await {
@@ -386,6 +419,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<UpdateServerStatusRequest>,
     ) -> Result<Response<UpdateServerStatusResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let status = control_plane::ServerStatus::try_from(req.status)
             .map_err(|_| Status::invalid_argument("Invalid server status"))?;
@@ -407,6 +441,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<GetRoutingRulesRequest>,
     ) -> Result<Response<GetRoutingRulesResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let rules = self.state.list_routing_rules().await;
 
@@ -427,6 +462,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<AddRoutingRuleRequest>,
     ) -> Result<Response<AddRoutingRuleResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let rule = req
             .rule
@@ -444,6 +480,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<RemoveRoutingRuleRequest>,
     ) -> Result<Response<RemoveRoutingRuleResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
 
         match self.state.remove_routing_rule(&req.id).await {
@@ -462,6 +499,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<ToggleRoutingRuleRequest>,
     ) -> Result<Response<ToggleRoutingRuleResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
 
         match self.state.toggle_routing_rule(&req.id, req.enabled).await {
@@ -475,8 +513,9 @@ impl ControlPlane for GrpcControlPlane {
 
     async fn get_metrics(
         &self,
-        _request: Request<GetMetricsRequest>,
+        request: Request<GetMetricsRequest>,
     ) -> Result<Response<GetMetricsResponse>, Status> {
+        self.check_auth(&request)?;
         let metrics = self.state.get_metrics().await;
 
         Ok(Response::new(GetMetricsResponse {
@@ -490,6 +529,7 @@ impl ControlPlane for GrpcControlPlane {
         &self,
         request: Request<StreamMetricsRequest>,
     ) -> Result<Response<Self::StreamMetricsStream>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let interval_ms = if req.interval_ms > 0 {
             req.interval_ms
@@ -529,8 +569,9 @@ impl ControlPlane for GrpcControlPlane {
 
     async fn health_check(
         &self,
-        _request: Request<HealthCheckRequest>,
+        request: Request<HealthCheckRequest>,
     ) -> Result<Response<HealthCheckResponse>, Status> {
+        self.check_auth(&request)?;
         Ok(Response::new(HealthCheckResponse {
             healthy: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -594,7 +635,11 @@ impl ControlPlaneServer {
             "Starting gRPC control plane"
         );
 
-        let grpc_service = GrpcControlPlane::new(self.state.clone());
+        let grpc_service = GrpcControlPlane::new(
+            self.state.clone(),
+            self.config.auth_enabled,
+            self.config.auth_token.clone(),
+        );
         let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         self.shutdown_rx = Some(shutdown_rx);
 
@@ -700,7 +745,7 @@ mod tests {
     #[tokio::test]
     async fn grpc_service_get_servers() {
         let state = Arc::new(ControlPlaneState::new());
-        let service = GrpcControlPlane::new(state.clone());
+        let service = GrpcControlPlane::new(state.clone(), false, None);
 
         let server = ServerInfo {
             name: "lobby".to_string(),
@@ -723,7 +768,7 @@ mod tests {
     #[tokio::test]
     async fn grpc_service_health_check() {
         let state = Arc::new(ControlPlaneState::new());
-        let service = GrpcControlPlane::new(state);
+        let service = GrpcControlPlane::new(state, false, None);
 
         let request = Request::new(HealthCheckRequest {});
         let response = service.health_check(request).await.unwrap();

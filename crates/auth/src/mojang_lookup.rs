@@ -67,6 +67,12 @@ pub async fn resolve_mojang_uuid(username: &str) -> Result<Uuid, MojangLookupErr
     if trimmed.is_empty() {
         return Err(MojangLookupError::NotFound(username.to_string()));
     }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(MojangLookupError::NotFound(username.to_string()));
+    }
 
     let url = format!(
         "https://api.mojang.com/users/profiles/minecraft/{}",

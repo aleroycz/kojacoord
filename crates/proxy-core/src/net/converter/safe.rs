@@ -13,8 +13,8 @@ where
     match std::panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(_) => {
-            tracing::error!(target: "converter", packet = what, "converter panicked; forwarding packet unchanged");
-            ConversionResult::Passthrough
+            tracing::error!(target: "converter", packet = what, "converter panicked; dropping packet");
+            ConversionResult::Drop
         },
     }
 }
@@ -93,6 +93,6 @@ mod tests {
     #[test]
     fn guard_catches_panic() {
         let r = guard("test", || panic!("boom"));
-        assert!(matches!(r, ConversionResult::Passthrough));
+        assert!(matches!(r, ConversionResult::Drop));
     }
 }

@@ -106,7 +106,9 @@ impl ProtocolCoverage {
             CanonicalVersion::V1_7_10,
             CanonicalVersion::V1_8,
             CanonicalVersion::V1_12_2,
+            CanonicalVersion::V1_15_2,
             CanonicalVersion::V1_16_5,
+            CanonicalVersion::V1_18_2,
             CanonicalVersion::V1_20_4,
         ] {
             canonical_coverage.insert((*canonical, *canonical), CoverageStatus::Complete);
@@ -329,7 +331,9 @@ impl ProtocolCoverage {
             CanonicalVersion::V1_7_10,
             CanonicalVersion::V1_8,
             CanonicalVersion::V1_12_2,
+            CanonicalVersion::V1_15_2,
             CanonicalVersion::V1_16_5,
+            CanonicalVersion::V1_18_2,
             CanonicalVersion::V1_20_4,
         ];
 
@@ -394,7 +398,9 @@ impl ProtocolCoverage {
             CanonicalVersion::V1_7_10,
             CanonicalVersion::V1_8,
             CanonicalVersion::V1_12_2,
+            CanonicalVersion::V1_15_2,
             CanonicalVersion::V1_16_5,
+            CanonicalVersion::V1_18_2,
             CanonicalVersion::V1_20_4,
         ];
 

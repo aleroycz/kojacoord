@@ -133,9 +133,19 @@ pub fn decompress(body: Bytes) -> Result<Bytes, ConnectionError> {
 
     let mut out = GLOBAL_BUFFER_POOL.acquire(data_len as usize);
     out.resize(data_len as usize, 0);
-    ZlibDecoder::new(cursor.as_ref())
-        .read_exact(&mut out)
-        .map_err(ConnectionError::Io)?;
+    let mut decoder = ZlibDecoder::new(cursor.as_ref());
+    decoder.read_exact(&mut out).map_err(ConnectionError::Io)?;
+
+    let mut trailing = [0u8; 1];
+    match decoder.read(&mut trailing) {
+        Ok(0) => {},
+        Ok(_) => {
+            return Err(ConnectionError::Protocol(ProtocolError::UnexpectedEof));
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {},
+        Err(e) => return Err(ConnectionError::Io(e)),
+    }
+
     Ok(out.freeze())
 }
 

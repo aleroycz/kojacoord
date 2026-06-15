@@ -851,11 +851,11 @@ fn s2c_animation(mut body: Bytes) -> ConversionResult {
 }
 
 /// 1.6.4 SpawnObject/Vehicle (Packet23, 0x17):
-///   `[i32 eid][i8 type][i32 x][i32 y][i32 z][i8 pitch][i8 yaw][i32 thrower_eid]`
-///   + if thrower_eid > 0: `[i16 speed_x][i16 speed_y][i16 speed_z]`.
+///     `[i32 eid][i8 type][i32 x][i32 y][i32 z][i8 pitch][i8 yaw][i32 thrower_eid]`
+///     + if thrower_eid > 0: `[i16 speed_x][i16 speed_y][i16 speed_z]`.
 /// 1.12.2 SpawnObject (0x00):
-///   `[VarInt eid][u8 type][f64 x][f64 y][f64 z][i8 pitch][i8 yaw][i32 data]`
-///   + if data > 0: `[i16 speed_x][i16 speed_y][i16 speed_z]`.
+///     `[VarInt eid][u8 type][f64 x][f64 y][f64 z][i8 pitch][i8 yaw][i32 data]`
+///     + if data > 0: `[i16 speed_x][i16 speed_y][i16 speed_z]`.
 fn s2c_spawn_object(mut body: Bytes) -> ConversionResult {
     if body.remaining() < 4 + 1 + 4 + 4 + 4 + 1 + 1 + 4 {
         return ConversionResult::Passthrough;
@@ -1350,11 +1350,11 @@ fn s2c_spawn_global_entity(mut body: Bytes) -> ConversionResult {
 }
 
 /// 1.6.4 OpenWindow (Packet100, 0x64):
-///   `[u8 window_id][u8 inv_type][UCS-2 title][u8 slot_count][bool use_provided_title]`
-///   + `[i32 entity_id]` if inv_type==11.
+///     `[u8 window_id][u8 inv_type][UCS-2 title][u8 slot_count][bool use_provided_title]`
+///     + `[i32 entity_id]` if inv_type==11.
 /// 1.12.2 OpenWindow (0x13):
-///   `[u8 window_id][String type][String title][u8 slot_count]`
-///   + `[i32 entity_id]` if type=="EntityHorse".
+///     `[u8 window_id][String type][String title][u8 slot_count]`
+///     + `[i32 entity_id]` if type=="EntityHorse".
 fn s2c_open_window(mut body: Bytes) -> ConversionResult {
     if body.remaining() < 1 + 1 + 2 {
         return ConversionResult::Passthrough;
@@ -1570,7 +1570,9 @@ fn s2c_scoreboard_objective(mut body: Bytes) -> ConversionResult {
     if mode == 1 {
         VarInt(1).encode(&mut out).unwrap();
     } else {
-        VarInt(if mode == 0 { 0 } else { 2 }).encode(&mut out).unwrap();
+        VarInt(if mode == 0 { 0 } else { 2 })
+            .encode(&mut out)
+            .unwrap();
         VarInt(value.len() as i32).encode(&mut out).unwrap();
         out.extend_from_slice(value.as_bytes());
         VarInt(0).encode(&mut out).unwrap(); // type = "integer"
@@ -1676,7 +1678,7 @@ const V164_C2S_ENTITY_ACTION: u8 = 0x13; // Packet19EntityAction
 
 const V112_C2S_KEEP_ALIVE: u8 = 0x0B;
 const V112_C2S_CHAT: u8 = 0x02;
-const V112_C2S_PLAYER_POS_LOOK: u8 = 0x0E;
+const V112_C2S_PLAYER_POS_LOOK: u8 = 0x0D;
 const V112_C2S_PLAYER_DIGGING: u8 = 0x14;
 const V112_C2S_PLAYER_BLOCK_PLACEMENT: u8 = 0x1F;
 const V112_C2S_HELD_ITEM_CHANGE: u8 = 0x1A;
@@ -2155,9 +2157,9 @@ fn c2s_player_digging(mut body: Bytes) -> ConversionResult {
     let mut out = BytesMut::new();
     VarInt(status as i32).encode(&mut out).unwrap();
 
-    out.put_i64(x as i64);
-    out.put_i64(y as i64);
-    out.put_i64(z as i64);
+    let packed =
+        ((x as i64 & 0x3FFFFFF) << 38) | ((y as i64 & 0xFFF) << 26) | (z as i64 & 0x3FFFFFF);
+    out.put_i64(packed);
 
     VarInt(face as i32).encode(&mut out).unwrap();
 
@@ -2180,9 +2182,9 @@ fn c2s_player_block_placement(mut body: Bytes) -> ConversionResult {
 
     let mut out = BytesMut::new();
 
-    out.put_i64(x as i64);
-    out.put_i64(y as i64);
-    out.put_i64(z as i64);
+    let packed =
+        ((x as i64 & 0x3FFFFFF) << 38) | ((y as i64 & 0xFFF) << 26) | (z as i64 & 0x3FFFFFF);
+    out.put_i64(packed);
 
     VarInt(direction as i32).encode(&mut out).unwrap();
     VarInt(0).encode(&mut out).unwrap();
@@ -2260,7 +2262,10 @@ fn c2s_creative_inventory_action(mut body: Bytes) -> ConversionResult {
     let mut out = BytesMut::new();
     out.put_i16(slot);
     out.put_u8(0); // empty Slot
-    ConversionResult::Converted(vec![build_payload(V112_C2S_CREATIVE_INVENTORY_ACTION_OUT, &out)])
+    ConversionResult::Converted(vec![build_payload(
+        V112_C2S_CREATIVE_INVENTORY_ACTION_OUT,
+        &out,
+    )])
 }
 
 /// 1.6.4 EnchantItem (Packet108, 0x6C):

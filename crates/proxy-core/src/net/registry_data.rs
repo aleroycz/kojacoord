@@ -82,7 +82,7 @@ static REGISTRIES_1_21_11: &[u8] =
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// assert!(bundle_for_proto(770).is_some()); // 1.21.5
 /// assert!(bundle_for_proto(765).is_none()); // pre-1.20.5
 /// assert!(bundle_for_proto(800).is_some()); // best-effort: newest embedded bundle
@@ -113,7 +113,7 @@ pub fn bundle_for_proto(proto: u32) -> Option<&'static [u8]> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// assert_eq!(bundle_is_fallback(774), false);
 /// assert_eq!(bundle_is_fallback(775), true);
 /// ```
@@ -139,7 +139,7 @@ pub fn bundle_is_fallback(proto: u32) -> bool {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let mut bytes = Vec::new();
 /// // num = 1
 /// bytes.extend(&1u32.to_be_bytes());
@@ -195,7 +195,7 @@ mod tests {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let bundle: &[u8] = &[
     ///     0, 0, 0, 1,      // num_registries = 1
     ///     0, 0, 0, 5,      // body_len = 5

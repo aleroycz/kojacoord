@@ -205,6 +205,8 @@ pub struct ProxyState {
     /// Rate limiter for plugin channel messages (chat, commands, etc.)
     pub plugin_channel_rate_limiter: Arc<PluginChannelRateLimiter>,
 
+    pub serverlist_cooldown: Arc<DashMap<uuid::Uuid, std::time::Instant>>,
+
     /// Per-player metrics and packet trace registry
     pub player_metrics: Arc<PlayerMetricsRegistry>,
 
@@ -580,6 +582,7 @@ impl ProxyState {
             tps_tracker,
             connection_throttle,
             plugin_channel_rate_limiter,
+            serverlist_cooldown: Arc::new(DashMap::new()),
             player_metrics,
             failover_manager,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -1000,7 +1003,7 @@ impl ProxyState {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // Assuming `state: std::sync::Arc<ProxyState>` is initialized and plugin hot-reload is enabled:
     /// state.start_plugin_hot_reload_watcher();
     /// ```

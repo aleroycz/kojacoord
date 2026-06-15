@@ -24,7 +24,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use wasmtime::{Caller, Config, Engine, Instance, Linker, Module, Store, Val};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
+use wasmtime_wasi::preview1::WasiP1Ctx;
+use wasmtime_wasi::WasiCtxBuilder;
 
 /// One loaded plugin's owning state. `engine` + `module` are
 /// shareable across instances; `store` and `instance` are per-plugin
@@ -36,7 +37,7 @@ pub struct WasmPluginInstance {
     pub version: String,
     pub engine: Engine,
     pub module: Module,
-    pub store: Mutex<Store<WasiCtx>>,
+    pub store: Mutex<Store<WasiP1Ctx>>,
     pub instance: Mutex<Option<Instance>>,
     pub metadata: PluginMetadata,
 }
@@ -48,7 +49,7 @@ pub struct WasmPluginInstance {
 pub struct WasmLoader {
     engine: Engine,
     plugins: Arc<RwLock<HashMap<String, Arc<Mutex<WasmPluginInstance>>>>>,
-    linker: Mutex<Linker<WasiCtx>>,
+    linker: Mutex<Linker<WasiP1Ctx>>,
     verifier: PluginVerifier,
     sandbox_config: SandboxConfig,
 }
@@ -69,13 +70,14 @@ impl WasmLoader {
 
         // Set memory limits for security
         config.max_wasm_stack(512 * 1024); // 512KB stack
-                                           // Memory limits are set via allocation strategy in wasmtime 15
+                                           // Memory limits are set via allocation strategy in wasmtime 24
 
         let engine = Engine::new(&config).context("Failed to create Wasmtime engine")?;
 
         // Create linker with WASI support
         let mut linker = Linker::new(&engine);
-        wasmtime_wasi::add_to_linker(&mut linker, |s| s).context("Failed to add WASI to linker")?;
+        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |s: &mut WasiP1Ctx| s)
+            .context("Failed to add WASI to linker")?;
 
         // Add custom host functions for plugin API
         Self::add_host_functions(&mut linker, &engine)?;
@@ -107,13 +109,13 @@ impl WasmLoader {
     }
 
     /// Add custom host functions for the plugin API
-    fn add_host_functions(linker: &mut Linker<WasiCtx>, _engine: &Engine) -> Result<()> {
+    fn add_host_functions(linker: &mut Linker<WasiP1Ctx>, _engine: &Engine) -> Result<()> {
         // Add log function
         linker
             .func_wrap(
                 "kojacoord",
                 "log",
-                |mut caller: Caller<'_, WasiCtx>,
+                |mut caller: Caller<'_, WasiP1Ctx>,
                  level: u32,
                  ptr: u32,
                  len: u32|
@@ -148,7 +150,7 @@ impl WasmLoader {
             .func_wrap(
                 "kojacoord",
                 "get_config",
-                |mut caller: Caller<'_, WasiCtx>,
+                |mut caller: Caller<'_, WasiP1Ctx>,
                  key_ptr: u32,
                  key_len: u32,
                  out_ptr: u32,
@@ -227,7 +229,6 @@ impl WasmLoader {
 
         // Create WASI context with sandbox configuration
         let mut wasi_builder = WasiCtxBuilder::new();
-        wasi_builder.inherit_stdio();
 
         // Apply sandbox restrictions
         if !self.sandbox_config.allow_filesystem {
@@ -240,7 +241,7 @@ impl WasmLoader {
             log::info!("Network access disabled for WASM plugin {}", name);
         }
 
-        let wasi = wasi_builder.build();
+        let wasi = wasi_builder.build_p1();
 
         // Create store
         let mut store = Store::new(&self.engine, wasi);
@@ -352,10 +353,11 @@ impl WasmLoader {
                 .ok_or_else(|| anyhow::anyhow!("Plugin has no memory export"))?;
 
             let data = mem.data_mut(&mut *store);
-            if data.len() < args.len() {
+            let offset = 0x10000;
+            if data.len() < offset + args.len() {
                 return Err(anyhow::anyhow!("Plugin memory too small for arguments"));
             }
-            data[..args.len()].copy_from_slice(args);
+            data[offset..offset + args.len()].copy_from_slice(args);
         }
 
         // Call the function (simplified - in production, handle different signatures)
@@ -407,7 +409,7 @@ impl WasmLoader {
         let permissions = vec![];
 
         // Iterate over custom sections
-        // Note: wasmtime 15 changed the API - custom sections are not directly accessible
+        // Note: wasmtime 24 changed the API - custom sections are not directly accessible
         // For now, we'll use default metadata
         // In production, you'd need to parse the WASM binary directly or use wasmparser
         log::debug!("Using default metadata for WASM plugin {}", name);
@@ -561,8 +563,9 @@ impl Plugin for WasmPluginAdapter {
             .and_then(|e| e.into_memory())
         {
             let data = mem.data_mut(&mut *store);
-            if data.len() >= event_bytes.len() {
-                data[..event_bytes.len()].copy_from_slice(&event_bytes);
+            let offset = 0x10000;
+            if data.len() >= offset + event_bytes.len() {
+                data[offset..offset + event_bytes.len()].copy_from_slice(&event_bytes);
             }
         }
 
@@ -571,7 +574,7 @@ impl Plugin for WasmPluginAdapter {
             instance.get_typed_func::<(u32, u32), u32>(&mut *store, "handle_event")
         {
             let result = handle_func
-                .call(&mut *store, (0, event_bytes.len() as u32))
+                .call(&mut *store, (0x10000, event_bytes.len() as u32))
                 .context("Failed to call handle_event")?;
 
             // Parse result

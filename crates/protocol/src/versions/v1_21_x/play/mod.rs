@@ -294,7 +294,7 @@ mod packets {
         pub data_kept: u8,
         pub death_location: Option<(String, i64)>,
         pub portal_cooldown: VarInt,
-        pub sea_level: VarInt,
+        pub sea_level: Option<VarInt>,
     }
 
     impl PacketId for ClientboundRespawn {
@@ -322,7 +322,9 @@ mod packets {
                 None => dst.put_u8(0),
             }
             self.portal_cooldown.encode(dst)?;
-            self.sea_level.encode(dst)?;
+            if let Some(s) = &self.sea_level {
+                s.encode(dst)?;
+            }
             Ok(())
         }
     }
@@ -350,7 +352,11 @@ mod packets {
                 None
             };
             let portal_cooldown = VarInt::decode(src)?;
-            let sea_level = VarInt::decode(src)?;
+            let sea_level = if src.remaining() >= 1 {
+                Some(VarInt::decode(src)?)
+            } else {
+                None
+            };
             Ok(Self {
                 dimension_type,
                 dimension_name,

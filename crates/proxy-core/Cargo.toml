@@ -51,6 +51,10 @@ tokio-stream = "0.1"
 crossbeam-queue = "0.3.12"
 notify = "6.1.1"
 arc-swap = "1.7.1"
+ipnet = { workspace = true }
+
+[features]
+insecure-post-quantum = []
 
 [build-dependencies]
 anyhow = "1"

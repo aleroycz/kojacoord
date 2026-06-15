@@ -62,6 +62,13 @@ impl Decoder for MinecraftFrameCodec {
         };
 
         let header_len = src.len() - peek.len();
+        if len_varint.0 < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("negative frame length {}", len_varint.0),
+            ));
+        }
+
         let payload_len = len_varint.0 as usize;
 
         if payload_len > MAX_FRAME {

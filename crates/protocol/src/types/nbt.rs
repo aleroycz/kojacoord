@@ -13,6 +13,9 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
 
+const MAX_NBT_DEPTH: usize = 512;
+const MAX_NBT_ARRAY_LEN: i32 = 1_048_576;
+
 use crate::{
     codec::{Decode, Encode},
     error::ProtocolError,
@@ -126,13 +129,25 @@ fn read_nbt_string(src: &mut Bytes) -> Result<String, ProtocolError> {
     Ok(String::from_utf8(bytes.to_vec())?)
 }
 
-fn write_nbt_string(s: &str, dst: &mut BytesMut) {
+fn write_nbt_string(s: &str, dst: &mut BytesMut) -> Result<(), ProtocolError> {
     let bytes = s.as_bytes();
+    if bytes.len() > u16::MAX as usize {
+        return Err(ProtocolError::UnknownNbtTag(0));
+    }
     dst.put_u16(bytes.len() as u16);
     dst.put_slice(bytes);
+    Ok(())
 }
 
 fn read_tag_payload(tag_type: TagType, src: &mut Bytes) -> Result<NbtTag, ProtocolError> {
+    read_tag_payload_depth(tag_type, src, 0)
+}
+
+fn read_tag_payload_depth(
+    tag_type: TagType,
+    src: &mut Bytes,
+    depth: usize,
+) -> Result<NbtTag, ProtocolError> {
     match tag_type {
         TagType::End => Ok(NbtTag::End),
         TagType::Byte => {
@@ -175,7 +190,11 @@ fn read_tag_payload(tag_type: TagType, src: &mut Bytes) -> Result<NbtTag, Protoc
             if src.remaining() < 4 {
                 return Err(ProtocolError::UnexpectedEof);
             }
-            let len = src.get_i32() as usize;
+            let raw_len = src.get_i32();
+            if !(0..=MAX_NBT_ARRAY_LEN).contains(&raw_len) {
+                return Err(ProtocolError::UnknownNbtTag(0));
+            }
+            let len = raw_len as usize;
             if src.remaining() < len {
                 return Err(ProtocolError::UnexpectedEof);
             }
@@ -194,14 +213,32 @@ fn read_tag_payload(tag_type: TagType, src: &mut Bytes) -> Result<NbtTag, Protoc
             if src.remaining() < 4 {
                 return Err(ProtocolError::UnexpectedEof);
             }
-            let len = src.get_i32() as usize;
-            let mut items = Vec::with_capacity(len.min(65536));
-            for _ in 0..len {
-                items.push(read_tag_payload(element_type, src)?);
+            let raw_len = src.get_i32();
+            if !(0..=MAX_NBT_ARRAY_LEN).contains(&raw_len) {
+                return Err(ProtocolError::UnknownNbtTag(0));
             }
-            Ok(NbtTag::List(items))
+            let len = raw_len as usize;
+            if element_type == TagType::Compound {
+                if depth >= MAX_NBT_DEPTH {
+                    return Err(ProtocolError::UnknownNbtTag(0));
+                }
+                let mut items = Vec::with_capacity(len.min(65536));
+                for _ in 0..len {
+                    items.push(read_tag_payload_depth(element_type, src, depth + 1)?);
+                }
+                Ok(NbtTag::List(items))
+            } else {
+                let mut items = Vec::with_capacity(len.min(65536));
+                for _ in 0..len {
+                    items.push(read_tag_payload_depth(element_type, src, depth)?);
+                }
+                Ok(NbtTag::List(items))
+            }
         },
         TagType::Compound => {
+            if depth >= MAX_NBT_DEPTH {
+                return Err(ProtocolError::UnknownNbtTag(0));
+            }
             let mut map = HashMap::new();
             loop {
                 if src.is_empty() {
@@ -213,7 +250,7 @@ fn read_tag_payload(tag_type: TagType, src: &mut Bytes) -> Result<NbtTag, Protoc
                     break;
                 }
                 let name = read_nbt_string(src)?;
-                let tag = read_tag_payload(tag_type, src)?;
+                let tag = read_tag_payload_depth(tag_type, src, depth + 1)?;
                 map.insert(name, tag);
             }
             Ok(NbtTag::Compound(map))
@@ -222,7 +259,11 @@ fn read_tag_payload(tag_type: TagType, src: &mut Bytes) -> Result<NbtTag, Protoc
             if src.remaining() < 4 {
                 return Err(ProtocolError::UnexpectedEof);
             }
-            let len = src.get_i32() as usize;
+            let raw_len = src.get_i32();
+            if !(0..=MAX_NBT_ARRAY_LEN).contains(&raw_len) {
+                return Err(ProtocolError::UnknownNbtTag(0));
+            }
+            let len = raw_len as usize;
             let mut arr = Vec::with_capacity(len.min(65536));
             for _ in 0..len {
                 if src.remaining() < 4 {
@@ -236,7 +277,11 @@ fn read_tag_payload(tag_type: TagType, src: &mut Bytes) -> Result<NbtTag, Protoc
             if src.remaining() < 4 {
                 return Err(ProtocolError::UnexpectedEof);
             }
-            let len = src.get_i32() as usize;
+            let raw_len = src.get_i32();
+            if !(0..=MAX_NBT_ARRAY_LEN).contains(&raw_len) {
+                return Err(ProtocolError::UnknownNbtTag(0));
+            }
+            let len = raw_len as usize;
             let mut arr = Vec::with_capacity(len.min(65536));
             for _ in 0..len {
                 if src.remaining() < 8 {
@@ -249,20 +294,39 @@ fn read_tag_payload(tag_type: TagType, src: &mut Bytes) -> Result<NbtTag, Protoc
     }
 }
 
-fn write_tag_payload(tag: &NbtTag, dst: &mut BytesMut) {
+fn write_tag_payload(tag: &NbtTag, dst: &mut BytesMut) -> Result<(), ProtocolError> {
     match tag {
-        NbtTag::End => {},
-        NbtTag::Byte(v) => dst.put_i8(*v),
-        NbtTag::Short(v) => dst.put_i16(*v),
-        NbtTag::Int(v) => dst.put_i32(*v),
-        NbtTag::Long(v) => dst.put_i64(*v),
-        NbtTag::Float(v) => dst.put_f32(*v),
-        NbtTag::Double(v) => dst.put_f64(*v),
+        NbtTag::End => Ok(()),
+        NbtTag::Byte(v) => {
+            dst.put_i8(*v);
+            Ok(())
+        },
+        NbtTag::Short(v) => {
+            dst.put_i16(*v);
+            Ok(())
+        },
+        NbtTag::Int(v) => {
+            dst.put_i32(*v);
+            Ok(())
+        },
+        NbtTag::Long(v) => {
+            dst.put_i64(*v);
+            Ok(())
+        },
+        NbtTag::Float(v) => {
+            dst.put_f32(*v);
+            Ok(())
+        },
+        NbtTag::Double(v) => {
+            dst.put_f64(*v);
+            Ok(())
+        },
         NbtTag::ByteArray(arr) => {
             dst.put_i32(arr.len() as i32);
             for b in arr {
                 dst.put_i8(*b);
             }
+            Ok(())
         },
         NbtTag::String(s) => write_nbt_string(s, dst),
         NbtTag::List(items) => {
@@ -270,28 +334,32 @@ fn write_tag_payload(tag: &NbtTag, dst: &mut BytesMut) {
             dst.put_u8(elem_type);
             dst.put_i32(items.len() as i32);
             for item in items {
-                write_tag_payload(item, dst);
+                write_tag_payload(item, dst)?;
             }
+            Ok(())
         },
         NbtTag::Compound(map) => {
             for (name, tag) in map {
                 dst.put_u8(tag_type_byte(tag));
-                write_nbt_string(name, dst);
-                write_tag_payload(tag, dst);
+                write_nbt_string(name, dst)?;
+                write_tag_payload(tag, dst)?;
             }
             dst.put_u8(TagType::End as u8);
+            Ok(())
         },
         NbtTag::IntArray(arr) => {
             dst.put_i32(arr.len() as i32);
             for v in arr {
                 dst.put_i32(*v);
             }
+            Ok(())
         },
         NbtTag::LongArray(arr) => {
             dst.put_i32(arr.len() as i32);
             for v in arr {
                 dst.put_i64(*v);
             }
+            Ok(())
         },
     }
 }
@@ -317,9 +385,9 @@ fn tag_type_byte(tag: &NbtTag) -> u8 {
 impl Encode for Nbt {
     fn encode(&self, dst: &mut BytesMut) -> Result<(), ProtocolError> {
         dst.put_u8(TagType::Compound as u8);
-        write_nbt_string(&self.name, dst);
+        write_nbt_string(&self.name, dst)?;
         let compound = NbtTag::Compound(self.root.clone());
-        write_tag_payload(&compound, dst);
+        write_tag_payload(&compound, dst)?;
         Ok(())
     }
 }
@@ -512,7 +580,7 @@ pub fn skip(cur: &mut Bytes) -> Result<usize, ProtocolError> {
     let tag = TagType::from_u8(tag_byte)?;
     // Top-level value carries a name prefix: u16 length + UTF-8 bytes.
     skip_name(cur)?;
-    skip_payload(cur, tag)?;
+    skip_payload_depth(cur, tag, 0)?;
     Ok(start - cur.remaining())
 }
 
@@ -528,7 +596,7 @@ fn skip_name(cur: &mut Bytes) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn skip_payload(cur: &mut Bytes, tag: TagType) -> Result<(), ProtocolError> {
+fn skip_payload_depth(cur: &mut Bytes, tag: TagType, depth: usize) -> Result<(), ProtocolError> {
     match tag {
         TagType::End => Ok(()),
         TagType::Byte => need(cur, 1),
@@ -555,22 +623,36 @@ fn skip_payload(cur: &mut Bytes, tag: TagType) -> Result<(), ProtocolError> {
             if n < 0 {
                 return Err(ProtocolError::UnknownNbtTag(0));
             }
-            for _ in 0..n {
-                skip_payload(cur, inner)?;
+            if inner == TagType::Compound || inner == TagType::List {
+                if depth >= MAX_NBT_DEPTH {
+                    return Err(ProtocolError::UnknownNbtTag(0));
+                }
+                for _ in 0..n {
+                    skip_payload_depth(cur, inner, depth + 1)?;
+                }
+            } else {
+                for _ in 0..n {
+                    skip_payload_depth(cur, inner, depth)?;
+                }
             }
             Ok(())
         },
-        TagType::Compound => loop {
-            if cur.remaining() < 1 {
-                return Err(ProtocolError::UnexpectedEof);
+        TagType::Compound => {
+            if depth >= MAX_NBT_DEPTH {
+                return Err(ProtocolError::UnknownNbtTag(0));
             }
-            let child_byte = cur.get_u8();
-            if child_byte == TagType::End as u8 {
-                return Ok(());
+            loop {
+                if cur.remaining() < 1 {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let child_byte = cur.get_u8();
+                if child_byte == TagType::End as u8 {
+                    return Ok(());
+                }
+                let child = TagType::from_u8(child_byte)?;
+                skip_name(cur)?;
+                skip_payload_depth(cur, child, depth + 1)?;
             }
-            let child = TagType::from_u8(child_byte)?;
-            skip_name(cur)?;
-            skip_payload(cur, child)?;
         },
         TagType::IntArray => {
             need(cur, 4)?;
