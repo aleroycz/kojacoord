@@ -1,0 +1,23 @@
+[package]
+name = "kojacoord-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Guest SDK for writing Kojacoord WASM plugins: typed host imports, event dispatch, and the export_plugin! macro."
+documentation = "https://docs.rs/kojacoord-plugin-sdk"
+keywords = ["minecraft", "proxy", "plugin", "kojacoord", "wasm"]
+categories = ["game-development", "api-bindings", "wasm"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+kojacoord-plugin-abi = { path = "../plugin-abi", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

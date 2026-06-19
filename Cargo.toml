@@ -6,7 +6,9 @@ members = [
     "crates/proxy-core",
     "crates/config",
     "crates/api",
+    "crates/plugin-abi",
     "crates/plugin-system",
+    "crates/plugin-sdk",
     "crates/cluster",
     "crates/metrics",
 ]

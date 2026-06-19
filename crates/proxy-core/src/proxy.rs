@@ -994,6 +994,45 @@ impl ProxyState {
         });
     }
 
+    /// Drive delivery of Redis subscribe messages to WASM plugins.
+    ///
+    /// WASM guests can't run their own loop, so a guest that calls the
+    /// `redis_subscribe` host import has its incoming messages queued by
+    /// the host. This task drains those queues on a short interval and
+    /// feeds each message back into the plugin as a
+    /// [`PluginEvent::RedisMessage`], then acts on any subjectless
+    /// responses (broadcast / kick). The poll is cheap when no plugin
+    /// subscribed — every drain returns empty.
+    pub fn start_wasm_redis_pump(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(150));
+            loop {
+                tick.tick().await;
+                let responses = {
+                    let mgr = state
+                        .plugin_manager
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    mgr.pump_redis()
+                };
+                for resp in responses {
+                    match resp {
+                        PluginResponse::Broadcast(msg) => {
+                            state.broadcast_system_message(&msg).await
+                        },
+                        PluginResponse::KickPlayer { uuid, reason } => {
+                            let json =
+                                serde_json::json!({ "text": reason, "color": "red" }).to_string();
+                            state.kick_player(&uuid, &json).await;
+                        },
+                        _ => {},
+                    }
+                }
+            }
+        });
+    }
+
     /// Watch the configured plugins directory for new or modified plugin artifacts and enqueue reloads.
     ///
     /// Spawns two background tasks: a poll-based directory watcher that detects changes to files with
@@ -1267,6 +1306,81 @@ impl ProxyState {
             },
             PluginCommand::SendSystemMessage { uuid, message } => {
                 self.send_system_message_to(&uuid, &message).await;
+            },
+            PluginCommand::BroadcastMessage { message } => {
+                self.broadcast_system_message(&message).await;
+            },
+            PluginCommand::MutePlayer {
+                uuid,
+                reason,
+                duration_secs,
+            } => {
+                let expires_at = match duration_secs {
+                    Some(secs) if secs > 0 => {
+                        Some(chrono::Utc::now().naive_utc() + chrono::Duration::seconds(secs))
+                    },
+                    _ => None,
+                };
+                if let Some(db) = &self.db {
+                    if let Err(e) = db.insert_mute(uuid, &reason, plugin_name, expires_at).await {
+                        tracing::warn!(plugin = %plugin_name, error = %e, "plugin mute failed");
+                    }
+                }
+                let mute_state = crate::session::MuteState {
+                    reason: reason.clone(),
+                    expires_at,
+                };
+                if let Some(sess) = self.sessions.get(&uuid) {
+                    sess.write().await.mute = Some(mute_state.clone());
+                }
+                let notice = crate::relay::build_mute_notice(&mute_state);
+                self.send_system_message_to(&uuid, &notice).await;
+                tracing::info!(plugin = %plugin_name, "Muted player {}", uuid);
+            },
+            PluginCommand::UnmutePlayer { uuid } => {
+                if let Some(db) = &self.db {
+                    if let Err(e) = db.clear_mute(uuid).await {
+                        tracing::warn!(plugin = %plugin_name, error = %e, "plugin unmute failed");
+                    }
+                }
+                if let Some(sess) = self.sessions.get(&uuid) {
+                    sess.write().await.mute = None;
+                }
+                self.send_system_message_to(&uuid, "§aYour mute has been lifted.")
+                    .await;
+                tracing::info!(plugin = %plugin_name, "Unmuted player {}", uuid);
+            },
+            PluginCommand::BanPlayer {
+                uuid,
+                reason,
+                duration_secs,
+            } => {
+                let expires_at = match duration_secs {
+                    Some(secs) if secs > 0 => {
+                        Some(chrono::Utc::now().naive_utc() + chrono::Duration::seconds(secs))
+                    },
+                    _ => None,
+                };
+                if let Some(db) = &self.db {
+                    if let Err(e) = db.insert_ban(uuid, &reason, plugin_name, expires_at).await {
+                        tracing::warn!(plugin = %plugin_name, error = %e, "plugin ban failed");
+                    }
+                }
+                let json =
+                    serde_json::json!({ "text": format!("You have been banned: {}", reason), "color": "red" })
+                        .to_string();
+                self.kick_player(&uuid, &json).await;
+                tracing::info!(plugin = %plugin_name, "Banned player {}", uuid);
+            },
+            PluginCommand::WarnPlayer { uuid, reason } => {
+                if let Some(db) = &self.db {
+                    if let Err(e) = db.insert_warning(uuid, &reason, plugin_name).await {
+                        tracing::warn!(plugin = %plugin_name, error = %e, "plugin warn failed");
+                    }
+                }
+                self.send_system_message_to(&uuid, &format!("§e§lWarning: §r§7{}", reason))
+                    .await;
+                tracing::info!(plugin = %plugin_name, "Warned player {}", uuid);
             },
             PluginCommand::UpdatePlayerStatus {
                 uuid,

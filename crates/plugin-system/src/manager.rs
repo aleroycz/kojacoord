@@ -11,7 +11,6 @@ use crate::api::{
     PluginCommand, PluginCommandSpec, PluginContext, PluginEvent, PluginMetadata, PluginPermission,
     PluginResponse,
 };
-use crate::native_loader::PluginLoader;
 use crate::sandbox::{apply_sandbox, SandboxConfig};
 use crate::wasm_loader::{WasmLoader, WasmPluginAdapter};
 use anyhow::{Context, Result};
@@ -26,9 +25,6 @@ pub type SharedPlugin = Arc<Mutex<Box<dyn Plugin>>>;
 
 pub struct PluginManager {
     wasm_loader: Arc<WasmLoader>,
-    /// Loader for native `.dll`/`.so`/`.dylib`/`.kpl` plugins. Holds the mapped
-    /// library handles for the lifetime of their plugin instances.
-    native_loader: PluginLoader,
     plugins: HashMap<String, (SharedPlugin, PluginMetadata)>,
     plugin_configs: HashMap<String, PluginContext>,
     packet_hooks: Arc<RwLock<Vec<PacketEvent>>>,
@@ -74,7 +70,6 @@ impl PluginManager {
         let wasm_loader = Arc::new(WasmLoader::new()?);
         Ok(Self {
             wasm_loader,
-            native_loader: PluginLoader::new(),
             plugins: HashMap::new(),
             plugin_configs: HashMap::new(),
             packet_hooks: Arc::new(RwLock::new(Vec::new())),
@@ -104,7 +99,6 @@ impl PluginManager {
     pub fn with_wasm_loader(wasm_loader: WasmLoader) -> Result<Self, anyhow::Error> {
         Ok(Self {
             wasm_loader: Arc::new(wasm_loader),
-            native_loader: PluginLoader::new(),
             plugins: HashMap::new(),
             plugin_configs: HashMap::new(),
             packet_hooks: Arc::new(RwLock::new(Vec::new())),
@@ -316,9 +310,8 @@ impl PluginManager {
             .map(|e| e.to_ascii_lowercase())
             .unwrap_or_default();
 
-        // Dispatch on file type: WASM runs sandboxed; native libraries (.dll/
-        // .so/.dylib, or a .kpl archive wrapping one) run with full privileges
-        // behind the integrity allowlist.
+        // WASM-only: every plugin runs sandboxed in wasmtime. Native
+        // dynamic-library and `.kpl` loading was removed.
         let (mut plugin, metadata): (Box<dyn Plugin>, PluginMetadata) = match ext.as_str() {
             "wasm" => {
                 let wasm_bytes = std::fs::read(path).context("Failed to read WASM file")?;
@@ -340,20 +333,9 @@ impl PluginManager {
                 };
                 (Box::new(adapter) as Box<dyn Plugin>, metadata)
             },
-            "dll" | "so" | "dylib" => self
-                .native_loader
-                .load_plugin(path, &context)
-                .context("Failed to load native plugin")?,
-            "kpl" => {
-                let lib_path = Self::extract_kpl_library(path)
-                    .context("Failed to extract native library from .kpl archive")?;
-                self.native_loader
-                    .load_plugin(&lib_path, &context)
-                    .context("Failed to load native plugin from .kpl")?
-            },
             other => {
                 return Err(anyhow::anyhow!(
-                    "Unsupported plugin extension '{}' for {}",
+                    "Unsupported plugin extension '{}' for {} (only .wasm is supported)",
                     other,
                     path.display()
                 ));
@@ -536,12 +518,7 @@ impl PluginManager {
             let is_plugin = path
                 .extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|ext| {
-                    matches!(
-                        ext.to_ascii_lowercase().as_str(),
-                        "wasm" | "dll" | "so" | "dylib" | "kpl"
-                    )
-                });
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"));
             if is_plugin {
                 let plugin_name = path
                     .file_stem()
@@ -558,61 +535,6 @@ impl PluginManager {
         }
 
         Ok(())
-    }
-
-    /// Extracts the platform dynamic library bundled inside a `.kpl` ZIP archive into a temporary directory.
-    ///
-    /// The `.kpl` file is treated as a ZIP archive; every entry is extracted into a temp directory named
-    /// "kojacoord_plugin_<stem>_<pid>". Only each entry's file name is used (to prevent zip-slip); the first
-    /// extracted file with a `.so`, `.dll`, or `.dylib` suffix (case-insensitive) is returned. Other files
-    /// in the archive are copied alongside but are not inspected further.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the archive cannot be opened, extraction fails, or no native library file is found.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// # use std::path::Path;
-    /// # // Example assumes `example.kpl` exists on disk and contains a native library.
-    /// let lib_path = crate::extract_kpl_library(Path::new("example.kpl")).expect("extract kpl");
-    /// assert!(lib_path.exists());
-    /// ```
-    fn extract_kpl_library(kpl_path: &Path) -> anyhow::Result<std::path::PathBuf> {
-        let file = std::fs::File::open(kpl_path)?;
-        let mut archive = zip::ZipArchive::new(file)?;
-
-        let extract_dir = std::env::temp_dir().join(format!(
-            "kojacoord_plugin_{}_{}",
-            kpl_path.file_stem().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&extract_dir)?;
-
-        let mut lib_path = None;
-        for i in 0..archive.len() {
-            let mut zfile = archive.by_index(i)?;
-            // Guard against zip-slip: only use the file name, never any path
-            // components the archive might carry.
-            let name = match zfile
-                .enclosed_name()
-                .and_then(|p| p.file_name().map(|f| f.to_owned()))
-            {
-                Some(n) => n,
-                None => continue,
-            };
-            let out_path = extract_dir.join(&name);
-            let mut out = std::fs::File::create(&out_path)?;
-            std::io::copy(&mut zfile, &mut out)?;
-
-            let lname = name.to_string_lossy().to_ascii_lowercase();
-            if lname.ends_with(".so") || lname.ends_with(".dll") || lname.ends_with(".dylib") {
-                lib_path = Some(out_path);
-            }
-        }
-
-        lib_path.ok_or_else(|| anyhow::anyhow!("No native library found in .kpl archive"))
     }
 
     /// Unloads a loaded plugin, runs its teardown lifecycle, and removes its runtime state.
@@ -656,9 +578,6 @@ impl PluginManager {
             // the only strong ref — `broadcast_event`/`process_packet` borrow
             // the map rather than cloning the Arc — so this drop frees the Box.
             drop(plugin);
-            // No-op for WASM plugins (not registered in the native loader).
-            self.native_loader.unload(name);
-
             self.plugin_configs.remove(name);
 
             self.packet_hooks
@@ -732,6 +651,32 @@ impl PluginManager {
             }
         }
 
+        responses
+    }
+
+    /// Drain queued Redis subscribe messages from every plugin and feed
+    /// them back in as [`PluginEvent::RedisMessage`], collecting any
+    /// responses. Called on a short interval by the proxy so WASM plugins
+    /// that subscribed to Redis channels receive messages without running
+    /// their own loop. Cheap when no plugin subscribed (every drain is
+    /// empty).
+    pub fn pump_redis(&self) -> Vec<PluginResponse> {
+        let mut responses = Vec::new();
+        for (name, (plugin, _)) in &self.plugins {
+            let mut guard = plugin.lock().unwrap_or_else(|e| e.into_inner());
+            let msgs =
+                crate::guard_plugin_call("drain_redis_messages", || guard.drain_redis_messages())
+                    .unwrap_or_default();
+            for (channel, payload) in msgs {
+                let ev = PluginEvent::RedisMessage { channel, payload };
+                match crate::guard_plugin_call("handle_event", || guard.handle_event(&ev)) {
+                    Ok(Ok(Some(resp))) => responses.push(resp),
+                    Ok(Ok(None)) => {},
+                    Ok(Err(e)) => log::error!("Plugin '{}' redis handle_event error: {}", name, e),
+                    Err(e) => log::error!("Plugin '{}' redis handle_event panicked: {}", name, e),
+                }
+            }
+        }
         responses
     }
 

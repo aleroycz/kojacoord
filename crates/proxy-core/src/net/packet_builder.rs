@@ -60,12 +60,29 @@ pub fn build_system_message_packet(text: &str, proto: u32) -> Bytes {
         },
         _ => {
             use kojacoord_protocol::versions::v1_20_x::play::ClientboundSystemChat;
-            ClientboundSystemChat {
-                content: json,
-                overlay: false,
+            // SystemChat `content` is a JSON String on 1.20.2 (proto 764) but an
+            // NBT text component from 1.20.3 (proto 765+) — including 1.21 and
+            // 26.x. Sending the JSON String to a 765+ client makes it fail with
+            // `Failed to decode packet 'clientbound/minecraft:system_chat'` and
+            // disconnect, so hand-encode `[component NBT][bool overlay]` there.
+            match (proto >= 765)
+                .then(|| crate::net::limbo_packets::json_component_to_nameless_nbt(&json))
+                .flatten()
+            {
+                Some(nbt) => {
+                    use bytes::BufMut;
+                    payload.extend_from_slice(&nbt);
+                    payload.put_u8(0); // overlay = false
+                },
+                None => {
+                    ClientboundSystemChat {
+                        content: json,
+                        overlay: false,
+                    }
+                    .encode(&mut payload)
+                    .unwrap();
+                },
             }
-            .encode(&mut payload)
-            .unwrap();
         },
     }
 

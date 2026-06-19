@@ -282,6 +282,12 @@ impl PacketRelay {
         let cb_disc_id = cb_play(proto, "ClientboundDisconnect");
         let sb_pm_id = sb_plugin_message_id(proto);
         let sb_chat_ids = chat_packet_ids_for(proto);
+        // The modern `ServerboundChatCommand` packet carries the command text
+        // WITHOUT the leading slash, so we can't detect commands by sniffing for
+        // '/'. Track its id explicitly so we can route command packets to the
+        // command handler (and forward unhandled ones to the backend) instead of
+        // mistaking them for chat.
+        let sb_chat_cmd_id = sb_play(proto, "ServerboundChatCommand");
 
         let cb_chunk_id = cb_play(proto, "ClientboundLevelChunkWithLight");
         // Look these up via the central registry so adding a new
@@ -804,6 +810,20 @@ impl PacketRelay {
                         let mut body = payload.clone();
                         let _ = VarInt::decode(&mut body);
                         if let Ok(text) = String::decode(&mut body) {
+                            // A `ServerboundChatCommand` packet IS a command even
+                            // though its text has no leading slash; chat-message
+                            // packets are commands only when the player typed '/'.
+                            let is_command_packet =
+                                sb_chat_cmd_id != 0xFF && pkt_id == sb_chat_cmd_id;
+                            let treat_as_command = is_command_packet || text.starts_with('/');
+                            // Normalised command line (always slash-prefixed) for
+                            // the proxy command handler.
+                            let command_line = if treat_as_command && !text.starts_with('/') {
+                                format!("/{}", text)
+                            } else {
+                                text.clone()
+                            };
+
                             if let Err(reason) = check_chat_message(&text) {
                                 let username = session_c2s.read().await.username.clone();
                                 tracing::warn!(
@@ -811,6 +831,30 @@ impl PacketRelay {
                                     "exploit_guard: illegal chat — kicking"
                                 );
                                 kick!(cw_c2s, reason, proto, client_thresh);
+                            }
+
+                            // Mute enforcement. A muted player may still run
+                            // commands (so they can /appeal, /msg staff, etc.)
+                            // but every non-command chat line is swallowed and
+                            // they are reminded of the mute and its duration.
+                            if !treat_as_command {
+                                let active_mute = {
+                                    let s = session_c2s.read().await;
+                                    s.mute.as_ref().filter(|m| m.is_active()).cloned()
+                                };
+                                if let Some(mute) = active_mute {
+                                    let notice = build_mute_notice(&mute);
+                                    let raw = build_system_message_packet(&notice, proto);
+                                    write_client_packet(
+                                        &mut *cw_c2s.lock().await,
+                                        &raw,
+                                        proto,
+                                        client_thresh,
+                                    )
+                                    .await?;
+                                    tracing::debug!("dropped chat from muted player");
+                                    continue;
+                                }
                             }
 
                             if let Some(mode) = chat_signing_mode {
@@ -828,22 +872,10 @@ impl PacketRelay {
                                 }
                             }
 
-                            // Deliver chat to plugins (handle_event). A plugin may
-                            // request a kick, in which case we stop relaying.
-                            if state_c2s
-                                .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerChat {
-                                    uuid,
-                                    message: text.clone(),
-                                })
-                                .await
-                            {
-                                return Ok(());
-                            }
-
-                            if text.starts_with('/') {
+                            if treat_as_command {
                                 let mut messages: Vec<String> = Vec::new();
                                 let result = commands::handle_command(
-                                    &text,
+                                    &command_line,
                                     session_c2s.clone(),
                                     Arc::clone(&state_c2s),
                                     &mut |msg| messages.push(msg),
@@ -870,10 +902,24 @@ impl PacketRelay {
                                     }
                                 }
 
+                                // Proxy handled it — swallow. Otherwise fall
+                                // through so the original command packet reaches
+                                // the backend for server-side execution.
                                 if matches!(result, commands::CommandResult::Handled) {
                                     continue;
                                 }
                             } else {
+                                // Plain chat. Hand to plugins (a plugin may kick),
+                                // then broadcast across the network.
+                                if state_c2s
+                                    .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::PlayerChat {
+                                        uuid,
+                                        message: text.clone(),
+                                    })
+                                    .await
+                                {
+                                    return Ok(());
+                                }
                                 let (rank, name) = {
                                     let s = session_c2s.read().await;
                                     (s.rank.clone(), s.username.clone())
@@ -1150,6 +1196,49 @@ async fn handle_transfer_command(
 /// detected here, which is correct because ViaVersion's
 /// `vv:proxy_details` channel only appears on modern (post-1.13)
 /// connections where the proxy actually needs to translate.
+/// Build the plain-text chat line shown to a muted player when they try to
+/// speak. Permanent mutes (no `expires_at`) say so explicitly; timed mutes
+/// render the remaining time in a human-readable form. Plain text (not a
+/// JSON component) because [`build_system_message_packet`] wraps it.
+pub(crate) fn build_mute_notice(mute: &crate::session::MuteState) -> String {
+    let duration = match mute.expires_at {
+        None => "permanently".to_string(),
+        Some(exp) => {
+            let remaining = exp
+                .signed_duration_since(chrono::Utc::now().naive_utc())
+                .num_seconds()
+                .max(0);
+            format!("for {}", format_remaining(remaining))
+        },
+    };
+    format!(
+        "§cYou are muted {} and cannot chat. §7Reason: {}",
+        duration, mute.reason
+    )
+}
+
+/// Render a remaining-seconds count as e.g. `2d 3h 4m`, `5m 10s`, `30s`.
+fn format_remaining(total_secs: i64) -> String {
+    let days = total_secs / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    let mins = (total_secs % 3_600) / 60;
+    let secs = total_secs % 60;
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if mins > 0 {
+        parts.push(format!("{}m", mins));
+    }
+    if secs > 0 || parts.is_empty() {
+        parts.push(format!("{}s", secs));
+    }
+    parts.join(" ")
+}
+
 fn try_decode_plugin_channel(payload: bytes::Bytes) -> Option<String> {
     use kojacoord_protocol::codec::Decode;
     let mut cur = payload;

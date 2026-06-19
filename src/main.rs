@@ -17,11 +17,8 @@ async fn main() -> anyhow::Result<()> {
 
     let (non_blocking, _guard) = tracing_appender::non_blocking(file);
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        "kojacoord=info,warn,trace,debug"
-            .parse()
-            .expect("valid filter")
-    });
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info,kojacoord=info".parse().expect("valid filter"));
 
     use tracing_subscriber::prelude::*;
     tracing_subscriber::registry()
@@ -30,7 +27,14 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer()                            // file
             .with_ansi(false)
             .with_writer(non_blocking))
+        .with(BreadcrumbLayer)                                            // crash-report trail
         .init();
+
+    // Install the crash-report panic hook as early as possible so a panic on
+    // any thread (including the tokio worker pool spawned below) is captured
+    // into logs/crash-report-<timestamp>.txt. The breadcrumb layer above
+    // feeds the "last actions" section from ordinary log events.
+    kojacoord_proxy_core::crash_report::install_panic_hook();
 
     tracing::info!("KojacoordProxy starting…");
 
@@ -102,8 +106,33 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to initialize proxy state")?,
     );
 
+    // Seed the crash report with a curated, secret-free snapshot of this
+    // run. Never include tokens, the DB URL, or keys here — the report is
+    // meant to be shareable.
+    {
+        let plugins_loaded = state
+            .plugin_manager
+            .read()
+            .map(|m| m.loaded_plugins().len())
+            .unwrap_or(0);
+        kojacoord_proxy_core::crash_report::set_metadata(
+            kojacoord_proxy_core::crash_report::CrashMetadata {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                server_id: state.config.proxy.server_id.clone(),
+                bind: state.config.proxy.bind.clone(),
+                online_mode: state.config.proxy.online_mode,
+                max_players: state.config.proxy.max_players,
+                plugins_loaded,
+                started_at: state.started_at,
+            },
+        );
+    }
+
     // Start listening to plugin command channels.
     state.start_plugin_command_processors();
+
+    // Deliver Redis subscribe messages to WASM plugins on a short interval.
+    state.start_wasm_redis_pump();
 
     // Polling hot-reload watcher (no-op when plugins.hot_reload = false).
     state.start_plugin_hot_reload_watcher();
@@ -252,6 +281,16 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // An error out of the accept loop is a crash, not a clean shutdown —
+    // write a full crash report before we tear everything down.
+    if let Err(ref e) = result {
+        if let Some(path) =
+            kojacoord_proxy_core::crash_report::report_fatal_error("Accept loop terminated", e)
+        {
+            tracing::error!(report = %path.display(), "Crash report written");
+        }
+    }
+
     shutdown_state.shutdown_gracefully(&shutdown_reason).await;
 
     // Forceful exit. After `shutdown_gracefully` returns, every
@@ -265,6 +304,49 @@ async fn main() -> anyhow::Result<()> {
     let exit_code = if result.is_ok() { 0 } else { 1 };
     tracing::info!(exit_code, "Proxy exiting");
     std::process::exit(exit_code);
+}
+
+/// A `tracing` layer that mirrors INFO/WARN/ERROR events into the crash
+/// report's "last actions" breadcrumb trail. DEBUG/TRACE are skipped to keep
+/// the trail focused on meaningful actions rather than per-packet noise.
+struct BreadcrumbLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for BreadcrumbLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let level = *event.metadata().level();
+        if !matches!(
+            level,
+            tracing::Level::INFO | tracing::Level::WARN | tracing::Level::ERROR
+        ) {
+            return;
+        }
+        let mut visitor = FieldVisitor::default();
+        event.record(&mut visitor);
+        kojacoord_proxy_core::crash_report::record(format!(
+            "{level:>5} {}: {}",
+            event.metadata().target(),
+            visitor.0.trim_end()
+        ));
+    }
+}
+
+/// Flattens an event's `message` + structured fields into one line.
+#[derive(Default)]
+struct FieldVisitor(String);
+
+impl tracing::field::Visit for FieldVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?} ");
+        } else {
+            let _ = write!(self.0, "{}={value:?} ", field.name());
+        }
+    }
 }
 
 fn save_config(config: &kojacoord_config::ProxyConfig, path: &str) -> anyhow::Result<()> {

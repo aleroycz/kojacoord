@@ -420,15 +420,17 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       # Order matters when crates depend on each other. `protocol` must publish
-      # first (auth/netty depend on it); the rest are leaves today. docs.rs
-      # automatically builds & hosts documentation for each crate once it lands
-      # on crates.io (configured via [package.metadata.docs.rs]).
+      # first (auth/netty depend on it) and `plugin-abi` must precede both
+      # `plugin-system` and `plugin-sdk` (which depend on it); the rest are
+      # leaves today. docs.rs automatically builds & hosts documentation for
+      # each crate once it lands on crates.io (configured via
+      # [package.metadata.docs.rs]).
       - name: Publish crates (best-effort, in dependency order)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set +e
-          for crate in protocol auth netty config api plugin-system cluster metrics; do
+          for crate in protocol plugin-abi auth netty config api plugin-system plugin-sdk cluster metrics; do
             echo "::group::publish kojacoord-$crate"
             cargo publish --manifest-path "crates/$crate/Cargo.toml" --no-verify
             echo "exit=$? (non-fatal)"
@@ -464,11 +466,13 @@ jobs:
         run: |
           cargo doc --no-deps \
             -p kojacoord-protocol \
+            -p kojacoord-plugin-abi \
             -p kojacoord-auth \
             -p kojacoord-netty \
             -p kojacoord-config \
             -p kojacoord-api \
             -p kojacoord-plugin-system \
+            -p kojacoord-plugin-sdk \
             -p kojacoord-cluster \
             -p kojacoord-metrics
 

@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
+description = "Async Minecraft framing, compression and encryption codec layer for the Kojacoord proxy."
 
 [dependencies]
 tokio = { workspace = true }
@@ -19,4 +20,4 @@ flate2 = { workspace = true }
 aes = { workspace = true }
 cfb-mode = { workspace = true }
 cipher = "0.4"
-kojacoord-protocol = { path = "../protocol" }
+kojacoord-protocol = { path = "../protocol", version = "0.1.0" }

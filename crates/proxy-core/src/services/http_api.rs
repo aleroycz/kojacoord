@@ -50,6 +50,9 @@ pub async fn serve(proxy: Arc<ProxyState>, bind: String, token: String) -> anyho
         .route("/health", get(health))
         .route("/api/players", get(players))
         .route("/api/ban", post(ban))
+        .route("/api/warn", post(warn))
+        .route("/api/mute", post(mute))
+        .route("/api/unmute", post(unmute))
         .route("/api/purchase", post(purchase))
         .nest_service("/", dashboard_service)
         .layer(cors)
@@ -203,6 +206,226 @@ async fn ban(
     })
     .to_string();
     st.proxy.kick_player(&uuid, &kick_json).await;
+
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "uuid": uuid.hyphenated().to_string() })),
+    )
+}
+
+/// Resolve a sanction target from an explicit UUID or a username lookup.
+async fn resolve_target(
+    db: &crate::db::Db,
+    uuid: &Option<String>,
+    username: &Option<String>,
+) -> Option<Uuid> {
+    match (uuid, username) {
+        (Some(u), _) => Uuid::parse_str(u).ok(),
+        (None, Some(name)) => db.uuid_for_username(name).await.ok().flatten(),
+        _ => None,
+    }
+}
+
+/// Truncate a string to at most `max` bytes on a char boundary.
+fn clamp_to(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        s = s
+            .char_indices()
+            .take_while(|(idx, _)| *idx < max)
+            .map(|(_, c)| c)
+            .collect();
+    }
+    s
+}
+
+#[derive(Deserialize)]
+struct WarnRequest {
+    uuid: Option<String>,
+    username: Option<String>,
+    reason: Option<String>,
+    warned_by: Option<String>,
+}
+
+/// Record a warning and, if the player is online, deliver the reason to them.
+async fn warn(
+    State(st): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<WarnRequest>,
+) -> impl IntoResponse {
+    if !authorized(&headers, &st.token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+    let Some(db) = &st.proxy.db else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no database" })),
+        );
+    };
+
+    let Some(uuid) = resolve_target(db, &req.uuid, &req.username).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "player not found" })),
+        );
+    };
+
+    let reason = clamp_to(
+        req.reason
+            .unwrap_or_else(|| "Warned by an operator".to_owned()),
+        1024,
+    );
+    let warned_by = clamp_to(req.warned_by.unwrap_or_else(|| "dashboard".to_owned()), 256);
+
+    if let Err(e) = db.insert_warning(uuid, &reason, &warned_by).await {
+        tracing::warn!(error = %e, "dashboard warn failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "db error" })),
+        );
+    }
+
+    // Notify the player if they're online so the warning lands immediately.
+    st.proxy
+        .send_system_message_to(&uuid, &format!("§e§lWarning: §r§7{}", reason))
+        .await;
+
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "uuid": uuid.hyphenated().to_string() })),
+    )
+}
+
+#[derive(Deserialize)]
+struct MuteRequest {
+    uuid: Option<String>,
+    username: Option<String>,
+    reason: Option<String>,
+    muted_by: Option<String>,
+    /// Mute duration in seconds. Omitted, zero, or negative → permanent.
+    duration_secs: Option<i64>,
+}
+
+/// Mute a player's chat. The mute is persisted, applied to the live
+/// session (so the relay enforces it without a DB hit per message), and
+/// the player is notified of the duration.
+async fn mute(
+    State(st): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<MuteRequest>,
+) -> impl IntoResponse {
+    if !authorized(&headers, &st.token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+    let Some(db) = &st.proxy.db else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no database" })),
+        );
+    };
+
+    let Some(uuid) = resolve_target(db, &req.uuid, &req.username).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "player not found" })),
+        );
+    };
+
+    let reason = clamp_to(
+        req.reason
+            .unwrap_or_else(|| "Muted by an operator".to_owned()),
+        1024,
+    );
+    let muted_by = clamp_to(req.muted_by.unwrap_or_else(|| "dashboard".to_owned()), 256);
+
+    // Positive duration → timed mute; anything else → permanent.
+    let expires_at = match req.duration_secs {
+        Some(secs) if secs > 0 => {
+            Some(chrono::Utc::now().naive_utc() + chrono::Duration::seconds(secs))
+        },
+        _ => None,
+    };
+
+    if let Err(e) = db.insert_mute(uuid, &reason, &muted_by, expires_at).await {
+        tracing::warn!(error = %e, "dashboard mute failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "db error" })),
+        );
+    }
+
+    // Apply to the live session and notify the player, if online.
+    let mute_state = crate::session::MuteState {
+        reason: reason.clone(),
+        expires_at,
+    };
+    if let Some(sess) = st.proxy.sessions.get(&uuid) {
+        sess.write().await.mute = Some(mute_state.clone());
+    }
+    let notice = crate::relay::build_mute_notice(&mute_state);
+    st.proxy.send_system_message_to(&uuid, &notice).await;
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "uuid": uuid.hyphenated().to_string(),
+            "permanent": expires_at.is_none(),
+        })),
+    )
+}
+
+#[derive(Deserialize)]
+struct UnmuteRequest {
+    uuid: Option<String>,
+    username: Option<String>,
+}
+
+/// Lift a player's mute: clear it in the DB and the live session.
+async fn unmute(
+    State(st): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<UnmuteRequest>,
+) -> impl IntoResponse {
+    if !authorized(&headers, &st.token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+    let Some(db) = &st.proxy.db else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "no database" })),
+        );
+    };
+
+    let Some(uuid) = resolve_target(db, &req.uuid, &req.username).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "player not found" })),
+        );
+    };
+
+    if let Err(e) = db.clear_mute(uuid).await {
+        tracing::warn!(error = %e, "dashboard unmute failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "db error" })),
+        );
+    }
+
+    if let Some(sess) = st.proxy.sessions.get(&uuid) {
+        sess.write().await.mute = None;
+    }
+    st.proxy
+        .send_system_message_to(&uuid, "§aYour mute has been lifted.")
+        .await;
 
     (
         StatusCode::OK,

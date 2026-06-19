@@ -33,7 +33,9 @@ pub enum AuthError {
 impl AuthError {
     pub fn to_json_reason(&self) -> String {
         let text = match self {
-            Self::SessionServerRejected => "Failed to verify username!",
+            Self::SessionServerRejected => {
+                "Not authenticated! This server is in online mode — log in with a valid Minecraft (Mojang/Microsoft) account."
+            },
             Self::RateLimited => "Authentication servers are busy. Please try again.",
             Self::SessionServerUnreachable(_) => "Could not reach authentication servers.",
             Self::InvalidUsername => "Invalid username.",
