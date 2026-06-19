@@ -515,6 +515,14 @@ const CONFIGURATION: &[Entry] = &[
     (766, ProtocolState::Configuration, Direction::Serverbound, "ServerboundPluginMessage",       0x02),
     (766, ProtocolState::Configuration, Direction::Serverbound, "FinishConfiguration",            0x03),
     (766, ProtocolState::Configuration, Direction::Serverbound, "AcknowledgeFinishConfiguration", 0x03),
+    // Known-packs handshake (1.20.5+). The backend sends clientbound
+    // SelectKnownPacks and BLOCKS for the client's serverbound response before
+    // it will emit registry data + FinishConfiguration — the proxy must relay
+    // both. Verified against ViaVersion Clientbound/ServerboundConfigurationPackets1_21
+    // (SELECT_KNOWN_PACKS); unchanged through 26.x (no version-specific config
+    // packet enum past 1.21).
+    (766, ProtocolState::Configuration, Direction::Clientbound, "ClientboundSelectKnownPacks",     0x0e),
+    (766, ProtocolState::Configuration, Direction::Serverbound, "ServerboundSelectKnownPacks",     0x07),
     // 1.21+ (767) configuration layout is identical to 766 — inherits via
     // fallback. 1.21.4 / 1.21.5 also unchanged for our subset.
 ];
@@ -1731,6 +1739,31 @@ const PLAY: &[Entry] = &[
     (776, ProtocolState::Play, Direction::Serverbound, "ServerboundMovePlayerPosRot", 0x1f),
     (776, ProtocolState::Play, Direction::Serverbound, "ServerboundMovePlayerRot", 0x20),
     (776, ProtocolState::Play, Direction::Serverbound, "ServerboundMovePlayerStatusOnly", 0x21),
+
+    // ── Play→Configuration transition packets (1.20.2+).
+    //
+    // Needed when the proxy re-configures a client that is already in the
+    // Play state (limbo→backend handoff, server switch): it sends
+    // `ClientboundStartConfiguration` to drop the client back into the
+    // Configuration phase, then waits for the client's
+    // `ServerboundConfigurationAcknowledged` before bridging the new
+    // backend's config. Ordinals verified against ViaVersion
+    // `Clientbound/ServerboundPackets*` (START_CONFIGURATION /
+    // CONFIGURATION_ACKNOWLEDGED). Only the protos where the id changes are
+    // listed; intermediate protos inherit via the nearest-≤ fallback.
+    (764, ProtocolState::Play, Direction::Clientbound, "ClientboundStartConfiguration",     0x65),
+    (766, ProtocolState::Play, Direction::Clientbound, "ClientboundStartConfiguration",     0x69),
+    (768, ProtocolState::Play, Direction::Clientbound, "ClientboundStartConfiguration",     0x70),
+    (770, ProtocolState::Play, Direction::Clientbound, "ClientboundStartConfiguration",     0x6f),
+    (773, ProtocolState::Play, Direction::Clientbound, "ClientboundStartConfiguration",     0x74),
+    (775, ProtocolState::Play, Direction::Clientbound, "ClientboundStartConfiguration",     0x76),
+    (776, ProtocolState::Play, Direction::Clientbound, "ClientboundStartConfiguration",     0x76),
+    (764, ProtocolState::Play, Direction::Serverbound, "ServerboundConfigurationAcknowledged", 0x0b),
+    (766, ProtocolState::Play, Direction::Serverbound, "ServerboundConfigurationAcknowledged", 0x0c),
+    (768, ProtocolState::Play, Direction::Serverbound, "ServerboundConfigurationAcknowledged", 0x0e),
+    (771, ProtocolState::Play, Direction::Serverbound, "ServerboundConfigurationAcknowledged", 0x0f),
+    (775, ProtocolState::Play, Direction::Serverbound, "ServerboundConfigurationAcknowledged", 0x10),
+    (776, ProtocolState::Play, Direction::Serverbound, "ServerboundConfigurationAcknowledged", 0x10),
 ];
 
 const ALL_TABLES: &[&[Entry]] = &[PRE_NETTY, HANDSHAKE, STATUS, LOGIN, CONFIGURATION, PLAY];
@@ -1748,6 +1781,43 @@ pub fn build_default_registry() -> PacketRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn play_to_config_transition_ids() {
+        let r = build_default_registry();
+        let start = |p| {
+            r.get_id_for_version(
+                p,
+                ProtocolState::Play,
+                Direction::Clientbound,
+                "ClientboundStartConfiguration",
+            )
+        };
+        let ack = |p| {
+            r.get_id_for_version(
+                p,
+                ProtocolState::Play,
+                Direction::Serverbound,
+                "ServerboundConfigurationAcknowledged",
+            )
+        };
+        // Verified against ViaVersion Clientbound/ServerboundPackets*.
+        assert_eq!(start(764), Some(0x65));
+        assert_eq!(start(767), Some(0x69)); // inherits 766
+        assert_eq!(start(768), Some(0x70));
+        assert_eq!(start(770), Some(0x6F));
+        assert_eq!(start(772), Some(0x6F)); // inherits 770
+        assert_eq!(start(773), Some(0x74));
+        assert_eq!(start(775), Some(0x76));
+        assert_eq!(start(776), Some(0x76));
+        assert_eq!(ack(764), Some(0x0B));
+        assert_eq!(ack(767), Some(0x0C)); // inherits 766
+        assert_eq!(ack(770), Some(0x0E)); // inherits 768
+        assert_eq!(ack(771), Some(0x0F));
+        assert_eq!(ack(773), Some(0x0F)); // inherits 771
+        assert_eq!(ack(775), Some(0x10));
+        assert_eq!(ack(776), Some(0x10));
+    }
 
     #[test]
     fn keepalive_v1_12_2_is_0x1f() {

@@ -1,0 +1,22 @@
+[package]
+name = "kojacoord-plugin-abi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Wire types (events / commands / responses) shared by the Kojacoord plugin host and WASM guest SDK."
+documentation = "https://docs.rs/kojacoord-plugin-abi"
+keywords = ["minecraft", "proxy", "plugin", "kojacoord", "wasm"]
+categories = ["game-development", "api-bindings", "wasm"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

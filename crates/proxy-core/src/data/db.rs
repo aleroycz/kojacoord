@@ -50,6 +50,14 @@ pub struct ActiveBan {
     pub expires_at: Option<chrono::NaiveDateTime>,
 }
 
+/// An active mute. `expires_at` is `None` for a permanent mute.
+#[derive(Debug, Clone)]
+pub struct ActiveMute {
+    pub reason: String,
+    pub muted_by: String,
+    pub expires_at: Option<chrono::NaiveDateTime>,
+}
+
 impl Db {
     pub async fn connect(url: &str, max_connections: u32) -> Result<Self, sqlx::Error> {
         let pool = MySqlPoolOptions::new()
@@ -107,6 +115,35 @@ impl Db {
                 active TINYINT(1) DEFAULT 1,
                 INDEX idx_ban_uuid (player_uuid),
                 INDEX idx_ban_active (active)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS player_mutes (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                player_uuid VARCHAR(36) NOT NULL,
+                reason TEXT NOT NULL,
+                muted_by VARCHAR(64) NOT NULL,
+                muted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME NULL,
+                active TINYINT(1) DEFAULT 1,
+                INDEX idx_mute_uuid (player_uuid),
+                INDEX idx_mute_active (active)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS player_warnings (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                player_uuid VARCHAR(36) NOT NULL,
+                reason TEXT NOT NULL,
+                warned_by VARCHAR(64) NOT NULL,
+                warned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_warn_uuid (player_uuid)
             )",
         )
         .execute(&pool)
@@ -243,6 +280,41 @@ impl Db {
             .execute(&pool)
             .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_ban_active ON player_bans(active)")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS player_mutes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_uuid TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                muted_by TEXT NOT NULL,
+                muted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NULL,
+                active INTEGER DEFAULT 1
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_mute_uuid ON player_mutes(player_uuid)")
+            .execute(&pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_mute_active ON player_mutes(active)")
+            .execute(&pool)
+            .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS player_warnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_uuid TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                warned_by TEXT NOT NULL,
+                warned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_warn_uuid ON player_warnings(player_uuid)")
             .execute(&pool)
             .await?;
 
@@ -863,6 +935,142 @@ impl Db {
                 }
                 Ok(None)
             },
+        }
+    }
+
+    /// Insert a mute. `expires_at` is `None` for a permanent mute.
+    pub async fn insert_mute(
+        &self,
+        uuid: Uuid,
+        reason: &str,
+        muted_by: &str,
+        expires_at: Option<chrono::NaiveDateTime>,
+    ) -> Result<(), sqlx::Error> {
+        // A player can only carry one active mute at a time — supersede any
+        // existing active mute so `active_mute` always reads the latest.
+        let _ = self.clear_mute(uuid).await;
+        let pool_query =
+            "INSERT INTO player_mutes (player_uuid, reason, muted_by, expires_at, active) VALUES (?, ?, ?, ?, 1)";
+        if let Some(pool) = &self.mysql_pool {
+            sqlx::query(pool_query)
+                .bind(uuid.hyphenated().to_string())
+                .bind(reason)
+                .bind(muted_by)
+                .bind(expires_at)
+                .execute(pool)
+                .await
+                .map(|_| ())
+        } else if let Some(pool) = &self.sqlite_pool {
+            sqlx::query(pool_query)
+                .bind(uuid.hyphenated().to_string())
+                .bind(reason)
+                .bind(muted_by)
+                .bind(expires_at)
+                .execute(pool)
+                .await
+                .map(|_| ())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Deactivate every active mute for a player (unmute).
+    pub async fn clear_mute(&self, uuid: Uuid) -> Result<(), sqlx::Error> {
+        let q = "UPDATE player_mutes SET active = 0 WHERE player_uuid = ? AND active = 1";
+        if let Some(pool) = &self.mysql_pool {
+            sqlx::query(q)
+                .bind(uuid.hyphenated().to_string())
+                .execute(pool)
+                .await
+                .map(|_| ())
+        } else if let Some(pool) = &self.sqlite_pool {
+            sqlx::query(q)
+                .bind(uuid.hyphenated().to_string())
+                .execute(pool)
+                .await
+                .map(|_| ())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Return the player's active (non-expired) mute, if any.
+    pub async fn active_mute(&self, uuid: Uuid) -> Result<Option<ActiveMute>, sqlx::Error> {
+        match self.db_type {
+            DbType::MySql => {
+                if let Some(pool) = &self.mysql_pool {
+                    let row = sqlx::query(
+                        "SELECT reason, muted_by, expires_at FROM player_mutes WHERE player_uuid = ? AND active = 1 AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY muted_at DESC LIMIT 1",
+                    )
+                    .bind(uuid.hyphenated().to_string())
+                    .fetch_optional(pool)
+                    .await?;
+                    if let Some(r) = row {
+                        let expires_at_str = r.get::<Option<String>, _>("expires_at");
+                        let expires_at = expires_at_str.and_then(|s| {
+                            chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f").ok()
+                        });
+                        return Ok(Some(ActiveMute {
+                            reason: r.get::<String, _>("reason"),
+                            muted_by: r.get::<String, _>("muted_by"),
+                            expires_at,
+                        }));
+                    }
+                }
+                Ok(None)
+            },
+            DbType::Sqlite => {
+                if let Some(pool) = &self.sqlite_pool {
+                    let row = sqlx::query(
+                        "SELECT reason, muted_by, expires_at FROM player_mutes WHERE player_uuid = ? AND active = 1 AND (expires_at IS NULL OR datetime(expires_at) > datetime('now')) ORDER BY muted_at DESC LIMIT 1",
+                    )
+                    .bind(uuid.hyphenated().to_string())
+                    .fetch_optional(pool)
+                    .await?;
+                    if let Some(r) = row {
+                        let expires_at_str = r.get::<Option<String>, _>("expires_at");
+                        let expires_at = expires_at_str.and_then(|s| {
+                            chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok()
+                        });
+                        return Ok(Some(ActiveMute {
+                            reason: r.get::<String, _>("reason"),
+                            muted_by: r.get::<String, _>("muted_by"),
+                            expires_at,
+                        }));
+                    }
+                }
+                Ok(None)
+            },
+        }
+    }
+
+    /// Record a warning against a player. Warnings are advisory — they
+    /// don't gate chat or login; the player is simply notified.
+    pub async fn insert_warning(
+        &self,
+        uuid: Uuid,
+        reason: &str,
+        warned_by: &str,
+    ) -> Result<(), sqlx::Error> {
+        let q = "INSERT INTO player_warnings (player_uuid, reason, warned_by) VALUES (?, ?, ?)";
+        if let Some(pool) = &self.mysql_pool {
+            sqlx::query(q)
+                .bind(uuid.hyphenated().to_string())
+                .bind(reason)
+                .bind(warned_by)
+                .execute(pool)
+                .await
+                .map(|_| ())
+        } else if let Some(pool) = &self.sqlite_pool {
+            sqlx::query(q)
+                .bind(uuid.hyphenated().to_string())
+                .bind(reason)
+                .bind(warned_by)
+                .execute(pool)
+                .await
+                .map(|_| ())
+        } else {
+            Ok(())
         }
     }
 

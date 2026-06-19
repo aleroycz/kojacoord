@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
+description = "Redis-backed clustering, cross-node session state and orchestration for the Kojacoord proxy."
 
 [dependencies]
 tokio = { workspace = true }

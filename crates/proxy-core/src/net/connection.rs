@@ -49,7 +49,7 @@ use crate::{
     error::ConnectionError,
     modloader,
     packet_builder::build_system_message_packet,
-    packet_ids::{cb_config, cb_login, nearest, sb_config, sb_login},
+    packet_ids::{cb_config, cb_login, cb_play, nearest, sb_config, sb_login, sb_play},
     packet_io::{read_varint, NO_COMPRESSION},
     proxy::ProxyState,
     relay::PacketRelay,
@@ -341,6 +341,14 @@ pub struct ClientConnection {
     protocol_version: u32,
     compression_threshold: i32,
     ml_session: modloader::ModloaderSession,
+    /// True once the client's `ServerboundLoginAcknowledged` has been read off
+    /// the client stream (advancing the client out of the Login state into
+    /// Configuration). Set during `complete_backend_login`. Limbo uses this to
+    /// decide whether it still owes a LoginAck read: if a backend login partially
+    /// succeeds (consuming this packet) and then fails into limbo, limbo must NOT
+    /// re-read a LoginAck the client already sent — the client is now emitting
+    /// Configuration packets and a stale read would desync the stream.
+    client_login_acked: bool,
 }
 
 impl ClientConnection {
@@ -353,6 +361,7 @@ impl ClientConnection {
             protocol_version: 0,
             compression_threshold: NO_COMPRESSION,
             ml_session: modloader::ModloaderSession::new(),
+            client_login_acked: false,
         }
     }
 
@@ -1428,6 +1437,20 @@ impl ClientConnection {
             None => "PLAYER".to_owned(),
         };
 
+        // Load any active chat mute so the relay can gate chat without a
+        // per-message DB hit. Best-effort — a DB error just leaves the
+        // player unmuted for this session.
+        let mute = match &self.state.db {
+            Some(db) => match db.active_mute(uuid).await {
+                Ok(Some(m)) => Some(crate::session::MuteState {
+                    reason: m.reason,
+                    expires_at: m.expires_at,
+                }),
+                _ => None,
+            },
+            None => None,
+        };
+
         let session = Arc::new(RwLock::new(PlayerSession {
             uuid,
             username: username.clone(),
@@ -1448,6 +1471,7 @@ impl ClientConnection {
             view_distance: None,
             rank,
             cookies: crate::cookies_transfers::CookieStore::default(),
+            mute,
         }));
 
         self.state.sessions.insert(uuid, session.clone());
@@ -1597,7 +1621,17 @@ impl ClientConnection {
                 .state
                 .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::ServerConnect {
                     uuid,
-                    target,
+                    target: target.clone(),
+                })
+                .await;
+            // …and ServerConnected once the backend link is actually live
+            // (BungeeCord parity: ServerConnect is pre/cancellable, this is
+            // the post-connect notification).
+            let _ = self
+                .state
+                .dispatch_plugin_event(kojacoord_plugin_system::PluginEvent::ServerConnected {
+                    uuid,
+                    server: target,
                 })
                 .await;
         }
@@ -1638,6 +1672,15 @@ impl ClientConnection {
                                         uuid,
                                         from: None,
                                         to: target.clone(),
+                                    },
+                                )
+                                .await;
+                            let _ = self
+                                .state
+                                .dispatch_plugin_event(
+                                    kojacoord_plugin_system::PluginEvent::ServerConnected {
+                                        uuid,
+                                        server: target.clone(),
                                     },
                                 )
                                 .await;
@@ -1809,6 +1852,10 @@ impl ClientConnection {
             self.protocol_version,
             self.compression_threshold,
             self.ml_session.kind,
+            self.client_login_acked,
+            // The player is mid-game on another backend, so the client is in the
+            // Play state — limbo must transition it back to Configuration first.
+            true,
         );
         limbo.set_target(target.to_owned());
         let mut backend = limbo.run().await?;
@@ -1845,6 +1892,9 @@ impl ClientConnection {
                 uuid,
                 &props,
                 &mode,
+                // switch_to_server held the client in limbo first, so it is
+                // already in Play.
+                true,
             )
             .await?;
 
@@ -2233,6 +2283,9 @@ impl ClientConnection {
                                 uuid,
                                 &props,
                                 &mode,
+                                // Initial join: client is still in the login
+                                // handshake, its LoginAck is pending.
+                                false,
                             )
                             .await
                         {
@@ -2292,6 +2345,10 @@ impl ClientConnection {
             self.protocol_version,
             self.compression_threshold,
             self.ml_session.kind,
+            self.client_login_acked,
+            // Initial join: the client is still in the Login/Configuration
+            // handshake, not yet in Play.
+            false,
         );
         let mut backend = limbo.run().await?;
         // Route through the failover-aware path so a downed primary
@@ -2331,6 +2388,9 @@ impl ClientConnection {
                 uuid,
                 &props,
                 &mode,
+                // run_limbo_then_connect ran the limbo handler first, so the
+                // client is already in Play.
+                true,
             )
             .await?;
         if let Some(b) = selected_server.as_ref() {
@@ -2501,6 +2561,16 @@ impl ClientConnection {
         Ok(())
     }
 
+    /// `client_in_play` is true when the client has already been driven into the
+    /// Play state before this backend login runs — i.e. the limbo-based paths
+    /// (`switch_to_server`, `run_limbo_then_connect`) where the limbo handler has
+    /// already sent the client a JoinGame/Respawn. In that case the client has
+    /// long since sent its `LoginAcknowledged` (to the proxy) and is now emitting
+    /// Play packets, so we must NOT try to read a LoginAck off the client stream —
+    /// doing so would consume and discard a real Play packet and desync the relay.
+    /// On the initial-join path (`connect_to_backend`) the client is still in the
+    /// login handshake and its LoginAck is genuinely pending, so we read it.
+    #[allow(clippy::too_many_arguments)]
     async fn complete_backend_login(
         &mut self,
         conn: &mut TcpStream,
@@ -2509,6 +2579,7 @@ impl ClientConnection {
         uuid: Uuid,
         properties: &[kojacoord_auth::ProfileProperty],
         mode: &kojacoord_config::ForwardingMode,
+        client_in_play: bool,
     ) -> Result<i32, ConnectionError> {
         let client_proto = self.protocol_version;
         let mut backend_threshold: i32 = NO_COMPRESSION;
@@ -2746,7 +2817,11 @@ impl ClientConnection {
         // See https://minecraft.wiki/w/Java_Edition_protocol/Packets#Login_Acknowledged
         let client_has_cfg = nearest(client_proto).has_configuration_phase();
         if client_has_cfg && backend_has_cfg {
-            {
+            // Only the initial-join path has a pending client LoginAck to read.
+            // On the limbo paths the client is already in Play (see
+            // `client_in_play` doc above), so reading here would swallow a real
+            // Play packet and desync the relay.
+            if !client_in_play {
                 let actual =
                     crate::packet_io::read_packet(&mut self.stream, self.compression_threshold)
                         .await?;
@@ -2766,6 +2841,10 @@ impl ClientConnection {
                 } else {
                     tracing::debug!(packet_id = pkt_id, "received LoginAcknowledged from client");
                 }
+                // The client is now out of the Login state regardless of which
+                // packet it actually sent — record it so a later fall-back into
+                // limbo doesn't try to read this LoginAck a second time.
+                self.client_login_acked = true;
             }
 
             {
@@ -2779,6 +2858,17 @@ impl ClientConnection {
                     packet_id = id_login_ack,
                     "sent LoginAcknowledged to backend"
                 );
+            }
+
+            // If the client reached us already in Play (limbo→backend handoff
+            // or server switch), it never re-ran the login handshake and is
+            // still in the Play state. Drop it back into Configuration with a
+            // StartConfiguration → ConfigurationAcknowledged round-trip before
+            // bridging the new backend's config phase — otherwise the client
+            // ignores the config packets and never acks FinishConfiguration,
+            // leaving the player stuck at "Joining world" until it times out.
+            if client_in_play {
+                self.transition_client_to_config().await?;
             }
 
             self.relay_config_phase(conn, backend_threshold).await?;
@@ -2800,6 +2890,71 @@ impl ClientConnection {
         Ok(backend_threshold)
     }
 
+    /// Drive a client that is already in the Play state back into the
+    /// Configuration phase so the proxy can deliver a new backend's
+    /// configuration (registries, tags, …). Sends `ClientboundStartConfiguration`
+    /// then consumes any in-flight Play packets until the client replies with
+    /// `ServerboundConfigurationAcknowledged`. Used on the limbo→backend and
+    /// server-switch paths where the client never re-ran the login handshake.
+    async fn transition_client_to_config(&mut self) -> Result<(), ConnectionError> {
+        let proto = self.protocol_version;
+        let client_thresh = self.compression_threshold;
+
+        let start_cfg_id = cb_play(proto, "ClientboundStartConfiguration");
+        let ack_id = sb_play(proto, "ServerboundConfigurationAcknowledged");
+        if start_cfg_id == 0xFF || ack_id == 0xFF {
+            tracing::error!(
+                proto,
+                "no Play→Configuration transition ids for this protocol — \
+                 cannot re-configure an in-play client"
+            );
+            return Err(ConnectionError::Closed);
+        }
+
+        // Clientbound StartConfiguration carries no body — just the id.
+        let mut pkt = BytesMut::new();
+        VarInt(start_cfg_id as i32).encode(&mut pkt)?;
+        crate::packet_io::write_packet(&mut self.stream, &pkt, client_thresh).await?;
+        tracing::debug!(
+            packet_id = start_cfg_id,
+            "sent StartConfiguration to client"
+        );
+
+        // Discard any Play packets the client already had queued until it
+        // acknowledges the switch back to Configuration.
+        loop {
+            let raw = match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                crate::packet_io::read_packet(&mut self.stream, client_thresh),
+            )
+            .await
+            {
+                Ok(Ok(raw)) => raw,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timed out waiting for ConfigurationAcknowledged",
+                    )));
+                },
+            };
+            let mut cur = raw.clone();
+            let id = VarInt::decode(&mut cur)
+                .map_err(ConnectionError::Protocol)?
+                .0 as u8;
+            if id == ack_id {
+                tracing::debug!("received ConfigurationAcknowledged from client");
+                self.client_login_acked = true;
+                break;
+            }
+            tracing::trace!(
+                packet_id = id,
+                "discarding in-flight Play packet during config transition"
+            );
+        }
+        Ok(())
+    }
+
     async fn relay_config_phase(
         &mut self,
         backend: &mut TcpStream,
@@ -2813,6 +2968,10 @@ impl ClientConnection {
         let id_sb_custom = sb_config(proto, "ServerboundCustomPayload");
         let id_cb_ping = cb_config(proto, "ClientboundPing");
         let id_cfg_ack_sb = sb_config(proto, "AcknowledgeFinishConfiguration");
+        // Known-packs handshake (1.20.5+): the backend blocks on the client's
+        // response before sending registry data, so we must relay both ways.
+        let id_cb_known_packs = cb_config(proto, "ClientboundSelectKnownPacks");
+        let id_sb_known_packs = sb_config(proto, "ServerboundSelectKnownPacks");
 
         let mut buffered_for_client: Vec<Bytes> = Vec::new();
 
@@ -2894,6 +3053,47 @@ impl ClientConnection {
                     crate::packet_io::read_packet(&mut self.stream, client_thresh).await?;
                 crate::packet_io::write_packet(backend, &pong_raw, backend_threshold).await?;
                 tracing::debug!("config-phase Ping/Pong relayed");
+            } else if id_cb_known_packs != 0xFF && pkt_id == id_cb_known_packs {
+                // The backend will not send registry data or FinishConfiguration
+                // until it receives the client's known-packs response. Forward
+                // the request to the client, then drain the client's config
+                // packets to the backend until we relay that response. The
+                // client may have already queued ClientInformation / plugin
+                // messages (especially on the re-config path), so forward
+                // everything up to and including the response.
+                tracing::debug!("relaying config-phase SelectKnownPacks");
+                crate::packet_io::write_packet(&mut self.stream, &raw_payload, client_thresh)
+                    .await?;
+                loop {
+                    let resp = match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        crate::packet_io::read_packet(&mut self.stream, client_thresh),
+                    )
+                    .await
+                    {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            return Err(ConnectionError::Io(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "timed out waiting for client SelectKnownPacks response",
+                            )));
+                        },
+                    };
+                    let mut rc = resp.clone();
+                    let rid = VarInt::decode(&mut rc)
+                        .map_err(ConnectionError::Protocol)?
+                        .0 as u8;
+                    crate::packet_io::write_packet(backend, &resp, backend_threshold).await?;
+                    if rid == id_sb_known_packs {
+                        tracing::debug!("config-phase SelectKnownPacks exchange relayed");
+                        break;
+                    }
+                    tracing::trace!(
+                        packet_id = rid,
+                        "relayed client config packet to backend before known-packs response"
+                    );
+                }
             } else {
                 buffered_for_client.push(raw_payload);
             }
@@ -2960,6 +3160,43 @@ impl ClientConnection {
             .unwrap_or(false);
 
         let backend_protocol = self.backend_protocol_for(current_server.as_deref());
+
+        // Reject a client we can't faithfully translate to this backend. When
+        // the protocols differ and no converter covers the pair (e.g. a 26.x
+        // client whose shifted play ids have no remap onto an older backend),
+        // forwarding would feed the client mismatched-id packets and hang it at
+        // "Joining world". Kick with a clear "Outdated client" notice and the
+        // protocol the backend actually speaks.
+        if backend_protocol != self.protocol_version
+            && !crate::converter::has_support(self.protocol_version, backend_protocol)
+        {
+            let reason = format!(
+                r#"{{"text":"Outdated client! This server requires protocol {}. Please connect with a matching version.","color":"red"}}"#,
+                backend_protocol
+            );
+            tracing::warn!(
+                client_proto = self.protocol_version,
+                backend_proto = backend_protocol,
+                "rejecting client: no converter for client↔backend protocol pair"
+            );
+            let canonical = nearest(self.protocol_version).canonical_typed_packet_version();
+            if let Some(pkt) = crate::login_packets::build_play_disconnect(
+                canonical,
+                self.protocol_version,
+                &reason,
+            ) {
+                let mut buf = BytesMut::new();
+                VarInt(pkt.id as i32).encode(&mut buf)?;
+                buf.extend_from_slice(&pkt.body);
+                let _ = crate::packet_io::write_packet(
+                    &mut self.stream,
+                    &buf,
+                    self.compression_threshold,
+                )
+                .await;
+            }
+            return Err(ConnectionError::Closed);
+        }
 
         // Legacy clients always need conversion (their wire shape differs from
         // every modern backend); other clients need it whenever the lobby's

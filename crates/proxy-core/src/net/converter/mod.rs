@@ -498,12 +498,45 @@ fn nearest(raw: u32) -> ProtocolVersion {
 fn canonical_for_dispatch(raw: u32) -> CanonicalVersion {
     let v = nearest(raw).canonical_typed_packet_version();
     match v {
-        CanonicalVersion::V1_21 | CanonicalVersion::V26 => CanonicalVersion::V1_20_4,
+        CanonicalVersion::V1_21 => CanonicalVersion::V1_20_4,
         CanonicalVersion::V1_19_4 => CanonicalVersion::V1_16_5,
         CanonicalVersion::V1_15_2 => CanonicalVersion::V1_12_2,
         CanonicalVersion::V1_18_2 => CanonicalVersion::V1_16_5,
+        // 26.x is intentionally NOT folded into V1_20_4: its play packet ids
+        // shifted relative to 1.21.x, and no converter remaps them. Keeping it
+        // a distinct bucket means a 26.x client on a non-26.x backend lands on
+        // the unsupported path (see `has_support`) and is rejected cleanly
+        // instead of being fed mismatched-id packets and hanging.
+        CanonicalVersion::V26 => CanonicalVersion::V26,
         other => other,
     }
+}
+
+/// Whether the proxy can faithfully bridge packets between a client on
+/// `client_proto` and a backend on `backend_proto`.
+///
+/// Same protocol → always (no conversion needed). Legacy clients
+/// (pre-netty / 1.7 / 1.8) are always converted — that is the converter's
+/// core job. Two *modern* versions are only compatible when they share a
+/// dispatch canonical (identical wire ids); otherwise there is no converter
+/// and forwarding would corrupt the stream — the caller should reject the
+/// client rather than let it hang at "Joining world".
+pub fn has_support(client_proto: u32, backend_proto: u32) -> bool {
+    if client_proto == backend_proto {
+        return true;
+    }
+    let legacy = |p: u32| {
+        matches!(
+            nearest(p).epoch(),
+            kojacoord_protocol::Epoch::PreNetty
+                | kojacoord_protocol::Epoch::V1_7
+                | kojacoord_protocol::Epoch::V1_8
+        )
+    };
+    if legacy(client_proto) || legacy(backend_proto) {
+        return true;
+    }
+    canonical_for_dispatch(client_proto) == canonical_for_dispatch(backend_proto)
 }
 
 fn dispatch_canonical_s2c(

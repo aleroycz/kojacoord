@@ -26,7 +26,7 @@ use uuid::Uuid;
 /// fail to decode the component (e.g. `Failed to decode packet
 /// 'clientbound/minecraft:system_chat'`). Returns `None` if the JSON can't be
 /// represented (the caller then falls back rather than emit a broken packet).
-pub(super) fn json_component_to_nameless_nbt(json: &str) -> Option<Vec<u8>> {
+pub(crate) fn json_component_to_nameless_nbt(json: &str) -> Option<Vec<u8>> {
     use kojacoord_protocol::codec::Encode;
     use kojacoord_protocol::types::nbt::{Nbt, NbtTag};
 

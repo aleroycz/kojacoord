@@ -15,6 +15,26 @@ use uuid::Uuid;
 
 use crate::cookies_transfers::CookieStore;
 
+/// Live mute state cached on the session so the relay can gate chat
+/// without a database round-trip per message. `expires_at` is `None`
+/// for a permanent mute. The relay treats an `expires_at` in the past
+/// as expired (no longer muted).
+#[derive(Debug, Clone)]
+pub struct MuteState {
+    pub reason: String,
+    pub expires_at: Option<chrono::NaiveDateTime>,
+}
+
+impl MuteState {
+    /// True if this mute is still in force at the current time.
+    pub fn is_active(&self) -> bool {
+        match self.expires_at {
+            None => true,
+            Some(exp) => exp > chrono::Utc::now().naive_utc(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionState {
     Handshaking,
@@ -38,6 +58,10 @@ pub struct PlayerSession {
 
     pub rank: String,
     pub cookies: CookieStore,
+
+    /// Active chat mute, loaded at login and updated live by the HTTP
+    /// API / sanction bridge. `None` means the player may chat freely.
+    pub mute: Option<MuteState>,
 }
 
 pub type SharedSession = Arc<RwLock<PlayerSession>>;

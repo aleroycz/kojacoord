@@ -1,10 +1,10 @@
 //! Plugin host.
 //!
-//! Two loaders share one public API ([`api::Plugin`]):
-//!   - `wasm_loader` — sandboxed wasmtime, slower but safe to run
-//!     unaudited modules
-//!   - native `.dll`/`.so`/`.dylib` plugins, fast but unsandboxed and
-//!     gated on the SHA-256 allowlist in [`integrity`]
+//! Plugins are **WebAssembly only** — loaded as `.wasm` modules running
+//! in a wasmtime sandbox ([`wasm_loader`]) with a whitelist of host
+//! imports (log, config, commands, permissions, Redis, HTTP). Native
+//! dynamic-library loading was removed: every plugin now runs sandboxed,
+//! so operators can run third-party modules they haven't audited.
 //!
 //! [`manager::PluginManager`] is the single owner of all loaded
 //! plugins; the proxy holds it inside a `std::sync::RwLock` because
@@ -16,7 +16,6 @@
 pub mod api;
 pub mod integrity;
 pub mod manager;
-pub mod native_loader;
 pub mod sandbox;
 pub mod wasm_loader;
 
@@ -27,7 +26,6 @@ pub use api::{
 };
 pub use integrity::PluginVerifier;
 pub use manager::PluginManager;
-pub use native_loader::PluginLoader;
 pub use sandbox::{apply_sandbox, validate_plugin_permissions, SandboxConfig};
 pub use wasm_loader::{WasmLoader, WasmPluginAdapter, WasmPluginInstance};
 

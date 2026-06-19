@@ -41,6 +41,10 @@ cipher = "0.4"
 chacha20poly1305 = "0.10"
 rand = "0.8"
 aead = "0.5"
+# Post-quantum KEM (ML-KEM / FIPS 203). Optional: pulled in only with the
+# `post-quantum` feature. 0.2.x tracks rand_core 0.6, matching the rand 0.8
+# stack used elsewhere in this crate.
+ml-kem = { version = "0.2", optional = true }
 sqlx = { version = "0.8", features = ["mysql", "sqlite", "runtime-tokio-rustls", "chrono", "uuid"] }
 chrono = { version = "0.4", features = ["serde"] }
 axum = { version = "0.7", features = ["macros"] }
@@ -53,8 +57,21 @@ notify = "6.1.1"
 arc-swap = "1.7.1"
 ipnet = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Crash-report memory map (loaded modules) + process/system memory figures.
+windows = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+
 [features]
-insecure-post-quantum = []
+# Enables the ML-KEM-768 (FIPS 203) + AES-256-GCM hybrid cipher in
+# `security::encryption`. Off by default because it pulls in the `ml-kem`
+# dependency and the PQ algorithm set is still maturing.
+post-quantum = ["dep:ml-kem"]
 
 [build-dependencies]
 anyhow = "1"

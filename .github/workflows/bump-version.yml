@@ -41,13 +41,24 @@ jobs:
           NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
           NEW_TAG="v$NEW_VERSION"
 
-          # Update [workspace.package] version
+          # Update [workspace.package] version. Every crate inherits this via
+          # `version.workspace = true`, so this single line bumps all member
+          # crate versions at once.
           sed -i "s/^version = \"$CURRENT\"/version = \"$NEW_VERSION\"/" Cargo.toml
+
+          # Bump the internal path-dependency version requirements too. These
+          # are pinned (e.g. `{ path = "../protocol", version = "0.1.0" }`) so
+          # the published crates resolve each other from crates.io. A caret
+          # requirement tolerates patch bumps but NOT a minor/major bump, so
+          # keep them in lockstep with the workspace version.
+          while IFS= read -r f; do
+            sed -i -E "s#(path = \"\.\./[^\"]+\", version = \")$CURRENT(\")#\1$NEW_VERSION\2#g" "$f"
+          done < <(find crates -name Cargo.toml)
 
           # Git config + commit + tag
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml
+          git add Cargo.toml crates/*/Cargo.toml
           git commit -m "chore: bump version to $NEW_VERSION"
           git tag "$NEW_TAG"
           git push origin HEAD:${{ github.ref_name }} --tags

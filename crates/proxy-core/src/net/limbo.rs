@@ -77,12 +77,30 @@ pub struct LimboHandler<'a> {
 
     target_server: Option<String>,
 
+    /// True when the client has already sent its `ServerboundLoginAcknowledged`
+    /// before limbo was entered (e.g. a backend login partially succeeded,
+    /// consuming it, then failed). When set, the configuration phase must skip
+    /// its LoginAck read — the client is already in the Configuration state and
+    /// reading here would swallow a real config packet and desync the stream.
+    client_past_login_ack: bool,
+
+    /// True when the client is already in the **Play** state when limbo is
+    /// entered — i.e. a live server switch or a backend kick, where the client
+    /// was mid-game on another backend. In that case limbo must first drop the
+    /// client back into Configuration (StartConfiguration → ConfigurationAck)
+    /// before sending its own config/JoinGame; otherwise the config packets hit
+    /// a play-state client and desync the stream (`block_event ... was larger
+    /// than I expected`). False on the initial-join path, where the client is
+    /// still in the Login/Configuration handshake.
+    client_in_play: bool,
+
     /// Cached per-canonical-version packet builder. Selected once at
     /// construction time from `protocol_version`'s canonical bucket.
     packets: &'static dyn LimboPackets,
 }
 
 impl<'a> LimboHandler<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: &'a mut McStream,
         state: Arc<ProxyState>,
@@ -90,6 +108,8 @@ impl<'a> LimboHandler<'a> {
         protocol_version: u32,
         compression_threshold: i32,
         ml_kind: modloader::ModloaderKind,
+        client_past_login_ack: bool,
+        client_in_play: bool,
     ) -> Self {
         let canonical = VersionRegistry::nearest(protocol_version).canonical_typed_packet_version();
         let packets = limbo_packets::for_version(canonical);
@@ -101,6 +121,8 @@ impl<'a> LimboHandler<'a> {
             compression_threshold,
             ml_kind,
             target_server: None,
+            client_past_login_ack,
+            client_in_play,
             packets,
         }
     }
@@ -438,6 +460,53 @@ impl<'a> LimboHandler<'a> {
     /// # Ok(())
     /// # }
     /// ```
+    /// Drop a client that is currently in the **Play** state back into the
+    /// Configuration phase: send `ClientboundStartConfiguration`, then discard
+    /// inbound Play packets until the client replies with
+    /// `ServerboundConfigurationAcknowledged`. Required before re-configuring a
+    /// player on a server switch / backend kick.
+    async fn transition_play_to_config(&mut self) -> Result<(), ConnectionError> {
+        use kojacoord_protocol::codec::Decode;
+        use kojacoord_protocol::types::VarInt;
+
+        let proto = self.protocol_version;
+        let threshold = self.compression_threshold;
+        let start_id = crate::packet_ids::cb_play(proto, "ClientboundStartConfiguration");
+        let ack_id = crate::packet_ids::sb_play(proto, "ServerboundConfigurationAcknowledged");
+        if start_id == 0xFF || ack_id == 0xFF {
+            tracing::error!(
+                proto,
+                "limbo: no Play→Configuration transition ids for this protocol — \
+                 cannot reset an in-play client"
+            );
+            return Err(ConnectionError::Closed);
+        }
+
+        crate::packet_io::write_typed_packet(&mut *self.stream, start_id, &[], proto, threshold)
+            .await?;
+        tracing::debug!(
+            packet_id = start_id,
+            "limbo: sent StartConfiguration to in-play client"
+        );
+
+        loop {
+            let raw = crate::packet_io::read_packet(&mut *self.stream, threshold).await?;
+            let mut cur = raw.clone();
+            let id = VarInt::decode(&mut cur)
+                .map_err(ConnectionError::Protocol)?
+                .0 as u8;
+            if id == ack_id {
+                tracing::debug!("limbo: received ConfigurationAcknowledged");
+                break;
+            }
+            tracing::trace!(
+                packet_id = id,
+                "limbo: discarding in-flight Play packet during config transition"
+            );
+        }
+        Ok(())
+    }
+
     async fn run_configuration_phase(&mut self) -> Result<(), ConnectionError> {
         use bytes::BytesMut;
         use kojacoord_protocol::codec::{Decode, Encode};
@@ -447,23 +516,46 @@ impl<'a> LimboHandler<'a> {
         let proto = self.protocol_version;
         let threshold = self.compression_threshold;
 
-        // 1. Client → proxy: ServerboundLoginAcknowledged.
-        let expected_login_ack = crate::packet_ids::sb_login(proto, "ServerboundLoginAcknowledged");
-        let raw = crate::packet_io::read_packet(&mut *self.stream, threshold).await?;
-        let mut cursor = raw;
-        let pkt_id = VarInt::decode(&mut cursor)
-            .map_err(ConnectionError::Protocol)?
-            .0 as u8;
-        if pkt_id != expected_login_ack {
-            tracing::warn!(
-                pkt_id,
-                expected = expected_login_ack,
-                "limbo config phase: expected LoginAcknowledged, got something else"
+        // 0. If the client is already in Play (server switch / backend kick),
+        // drop it back into Configuration first. Sending the FinishConfiguration
+        // below to a play-state client desyncs the stream — the client then
+        // misframes the next backend packet (`block_event ... was larger than I
+        // expected`). After this round-trip the client is in Configuration and
+        // the rest of this method proceeds normally.
+        if self.client_in_play {
+            self.transition_play_to_config().await?;
+        } else if self.client_past_login_ack {
+            // 1. Client → proxy: ServerboundLoginAcknowledged.
+            //
+            // Skip this read entirely when the client already left the Login
+            // state before limbo was entered (a backend login that consumed the
+            // LoginAck then failed). Reading here would consume a real
+            // Configuration-state packet the client has already started sending
+            // and desync the stream — the exact `expected LoginAcknowledged, got
+            // pkt_id=2` failure mode.
+            tracing::debug!(
+                proto,
+                "limbo config phase: client already past LoginAcknowledged — skipping read"
             );
-            // Don't bail — some launchers ship out-of-order packets;
-            // continuing into FinishConfiguration usually resyncs the
-            // client. If it doesn't, the next read will time out and
-            // the limbo's keepalive loop catches it.
+        } else {
+            let expected_login_ack =
+                crate::packet_ids::sb_login(proto, "ServerboundLoginAcknowledged");
+            let raw = crate::packet_io::read_packet(&mut *self.stream, threshold).await?;
+            let mut cursor = raw;
+            let pkt_id = VarInt::decode(&mut cursor)
+                .map_err(ConnectionError::Protocol)?
+                .0 as u8;
+            if pkt_id != expected_login_ack {
+                tracing::warn!(
+                    pkt_id,
+                    expected = expected_login_ack,
+                    "limbo config phase: expected LoginAcknowledged, got something else"
+                );
+                // Don't bail — some launchers ship out-of-order packets;
+                // continuing into FinishConfiguration usually resyncs the
+                // client. If it doesn't, the next read will time out and
+                // the limbo's keepalive loop catches it.
+            }
         }
 
         // 1b. Proxy → client: ClientboundRegistryData. Modern clients

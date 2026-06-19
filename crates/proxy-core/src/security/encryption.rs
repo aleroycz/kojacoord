@@ -1,5 +1,4 @@
-//! Pluggable AEAD cipher registry, plus an experimental post-quantum
-//! KEM hook.
+//! Pluggable AEAD cipher registry, plus a post-quantum KEM-DEM hybrid.
 //!
 //! Minecraft's wire protocol uses AES-128-CFB8 for the Login session
 //! key exchange — that's handled in `auth::encryption` and not
@@ -7,9 +6,15 @@
 //! ciphers we use to wrap inter-node communication (cluster gossip,
 //! control-plane payloads, etc.) where operators want algorithm agility.
 //!
-//! The PQ branch is exploratory; the implementation below is a
-//! Kyber-shaped placeholder rather than a real KEM. Do not enable it
-//! in production until it's swapped for `pqcrypto-kyber` or equivalent.
+//! The post-quantum option (gated behind the `post-quantum` cargo
+//! feature) is a real KEM-DEM hybrid: ML-KEM-768 (the NIST FIPS 203
+//! key-encapsulation mechanism, formerly CRYSTALS-Kyber, via the
+//! RustCrypto `ml-kem` crate) establishes a 32-byte shared secret which
+//! then keys AES-256-GCM for the bulk data. The recipient keypair lives
+//! in the [`EncryptionKey`] so the same `Cipher` trait round-trips. It
+//! is "hybrid" only in the KEM+DEM sense — it is **not** combined with a
+//! classical KEM, so deploy it alongside (not instead of) a classical
+//! cipher if you need hybrid PQ/classical security guarantees.
 
 use aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -42,7 +47,8 @@ pub enum EncryptionAlgorithm {
     ChaCha20Poly1305,
     /// XChaCha20-Poly1305 (extended nonce)
     XChaCha20Poly1305,
-    /// Post-quantum KEM (experimental - Kyber)
+    /// Post-quantum hybrid: ML-KEM-768 (FIPS 203) key encapsulation +
+    /// AES-256-GCM bulk encryption. Requires the `post-quantum` feature.
     PostQuantumKem,
     /// Custom/unknown
     Custom(u32),
@@ -88,11 +94,30 @@ impl EncryptionKey {
     /// `OsRng`. Errors only on `Custom(_)` — we can't guess a key size
     /// for an algorithm we don't know.
     pub fn generate(algorithm: EncryptionAlgorithm) -> Result<Self, String> {
+        // Post-quantum is special: the "key" is an ML-KEM keypair, not raw
+        // symmetric bytes, so it has its own generation path.
+        if algorithm == EncryptionAlgorithm::PostQuantumKem {
+            #[cfg(feature = "post-quantum")]
+            {
+                return Ok(Self {
+                    algorithm,
+                    key_data: pq::generate_keypair_bytes(),
+                    key_id: uuid::Uuid::new_v4().to_string(),
+                    nonce: None,
+                    counter: AtomicU64::new(0),
+                });
+            }
+            #[cfg(not(feature = "post-quantum"))]
+            {
+                return Err("PostQuantumKem requires the `post-quantum` cargo feature".to_string());
+            }
+        }
+
         let key_size = match algorithm {
             EncryptionAlgorithm::Aes256Gcm => 32,
             EncryptionAlgorithm::ChaCha20Poly1305 => 32,
             EncryptionAlgorithm::XChaCha20Poly1305 => 32,
-            EncryptionAlgorithm::PostQuantumKem => 32, // Kyber-512 key size
+            EncryptionAlgorithm::PostQuantumKem => unreachable!("handled above"),
             EncryptionAlgorithm::Custom(size) => {
                 return Err(format!(
                     "Custom algorithm requires explicit key size, got {}",
@@ -472,55 +497,154 @@ impl Cipher for XChaCha20Poly1305Cipher {
     }
 }
 
-/// EXPERIMENTAL — Kyber-shaped placeholder, NOT a real PQ KEM.
+/// ML-KEM-768 (FIPS 203) + AES-256-GCM hybrid cipher.
 ///
-/// The encrypt/decrypt path here just XORs against the key; it exists
-/// so the `EncryptionAlgorithm::PostQuantumKem` dispatch arm has
-/// something callable while the real integration is staged. Swap for
-/// one of: `pqcrypto-kyber`, `liboqs`, or a NIST PQC reference impl
-/// before exposing this anywhere user-reachable.
+/// This is a genuine KEM-DEM construction, not a placeholder:
+///
+/// * **KEM** — the recipient's ML-KEM-768 encapsulation (public) key is
+///   used to `encapsulate` a fresh 32-byte shared secret, producing a
+///   KEM ciphertext that only the holder of the matching decapsulation
+///   (private) key can open. This is the quantum-resistant part.
+/// * **DEM** — that shared secret keys AES-256-GCM, which encrypts the
+///   actual payload under a fresh random 96-bit nonce.
+///
+/// The [`EncryptionKey`] for this algorithm carries the *whole keypair*
+/// (see [`pq::generate_keypair_bytes`]): encryption needs the public
+/// half, decryption the private half, and keeping both together lets the
+/// symmetric `Cipher` trait round-trip without a separate key-exchange
+/// API. In a real deployment you would instead distribute only the
+/// encapsulation key to senders and keep the decapsulation key private.
+///
+/// Wire format produced by [`encrypt`](Cipher::encrypt):
+/// `[kem_ct_len: u32 BE][kem_ct][nonce: 12][aead_ct]`.
 pub struct PostQuantumKemCipher;
 
-#[cfg(feature = "insecure-post-quantum")]
+#[cfg(feature = "post-quantum")]
+mod pq {
+    use aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+    use ml_kem::kem::{Decapsulate, Encapsulate};
+    use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+
+    type Kem = MlKem768;
+    type Ek = <Kem as KemCore>::EncapsulationKey;
+    type Dk = <Kem as KemCore>::DecapsulationKey;
+
+    /// Generate a fresh ML-KEM-768 keypair and pack it as
+    /// `[ek_len: u32 BE][ek_bytes][dk_bytes]` for storage in
+    /// [`super::EncryptionKey::key_data`].
+    pub fn generate_keypair_bytes() -> Vec<u8> {
+        let (dk, ek) = Kem::generate(&mut OsRng);
+        let ek_bytes = ek.as_bytes();
+        let dk_bytes = dk.as_bytes();
+        let mut out = Vec::with_capacity(4 + ek_bytes.len() + dk_bytes.len());
+        out.extend_from_slice(&(ek_bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(&ek_bytes);
+        out.extend_from_slice(&dk_bytes);
+        out
+    }
+
+    /// Split packed `key_data` into `(ek_bytes, dk_bytes)`.
+    fn split_keypair(key_data: &[u8]) -> Result<(&[u8], &[u8]), String> {
+        if key_data.len() < 4 {
+            return Err("PQ key_data too short for length prefix".into());
+        }
+        let ek_len = u32::from_be_bytes(key_data[..4].try_into().unwrap()) as usize;
+        let rest = &key_data[4..];
+        if rest.len() < ek_len {
+            return Err("PQ key_data truncated: encapsulation key".into());
+        }
+        Ok((&rest[..ek_len], &rest[ek_len..]))
+    }
+
+    fn parse_ek(bytes: &[u8]) -> Result<Ek, String> {
+        let encoded = ml_kem::Encoded::<Ek>::try_from(bytes)
+            .map_err(|_| "invalid ML-KEM encapsulation key length".to_string())?;
+        Ok(Ek::from_bytes(&encoded))
+    }
+
+    fn parse_dk(bytes: &[u8]) -> Result<Dk, String> {
+        let encoded = ml_kem::Encoded::<Dk>::try_from(bytes)
+            .map_err(|_| "invalid ML-KEM decapsulation key length".to_string())?;
+        Ok(Dk::from_bytes(&encoded))
+    }
+
+    pub fn encrypt(plaintext: &[u8], key_data: &[u8]) -> Result<Vec<u8>, String> {
+        let (ek_bytes, _dk_bytes) = split_keypair(key_data)?;
+        let ek = parse_ek(ek_bytes)?;
+
+        // KEM: encapsulate a fresh shared secret to the recipient's public key.
+        let (kem_ct, shared) = ek
+            .encapsulate(&mut OsRng)
+            .map_err(|_| "ML-KEM encapsulation failed".to_string())?;
+
+        // DEM: AES-256-GCM under the shared secret with a random 96-bit nonce.
+        let cipher = Aes256Gcm::new_from_slice(shared.as_slice())
+            .map_err(|e| format!("AES-256-GCM key setup failed: {e}"))?;
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let aead_ct = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+            .map_err(|e| format!("AES-256-GCM encryption failed: {e}"))?;
+
+        let kem_ct = kem_ct.as_slice();
+        let mut out = Vec::with_capacity(4 + kem_ct.len() + 12 + aead_ct.len());
+        out.extend_from_slice(&(kem_ct.len() as u32).to_be_bytes());
+        out.extend_from_slice(kem_ct);
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&aead_ct);
+        Ok(out)
+    }
+
+    pub fn decrypt(ciphertext: &[u8], key_data: &[u8]) -> Result<Vec<u8>, String> {
+        let (_ek_bytes, dk_bytes) = split_keypair(key_data)?;
+        let dk = parse_dk(dk_bytes)?;
+
+        if ciphertext.len() < 4 {
+            return Err("PQ ciphertext too short for length prefix".into());
+        }
+        let kem_ct_len = u32::from_be_bytes(ciphertext[..4].try_into().unwrap()) as usize;
+        let rest = &ciphertext[4..];
+        if rest.len() < kem_ct_len + 12 {
+            return Err("PQ ciphertext truncated".into());
+        }
+        let (kem_ct_bytes, tail) = rest.split_at(kem_ct_len);
+        let (nonce_bytes, aead_ct) = tail.split_at(12);
+
+        // KEM: recover the shared secret with the private key.
+        let kem_ct = ml_kem::Ciphertext::<Kem>::try_from(kem_ct_bytes)
+            .map_err(|_| "invalid ML-KEM ciphertext length".to_string())?;
+        let shared = dk
+            .decapsulate(&kem_ct)
+            .map_err(|_| "ML-KEM decapsulation failed".to_string())?;
+
+        // DEM: AES-256-GCM open.
+        let cipher = Aes256Gcm::new_from_slice(shared.as_slice())
+            .map_err(|e| format!("AES-256-GCM key setup failed: {e}"))?;
+        cipher
+            .decrypt(Nonce::from_slice(nonce_bytes), aead_ct)
+            .map_err(|e| format!("AES-256-GCM decryption failed: {e}"))
+    }
+}
+
+#[cfg(feature = "post-quantum")]
 impl Cipher for PostQuantumKemCipher {
     fn encrypt(&self, plaintext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, String> {
         if key.algorithm != EncryptionAlgorithm::PostQuantumKem {
             return Err("Key algorithm mismatch".into());
         }
-
-        tracing::debug!(len = plaintext.len(), "Post-quantum KEM encrypt");
-
-        // Simplified KEM simulation
-        // In a real implementation, this would:
-        // 1. Generate a random ciphertext from the public key
-        // 2. Derive a shared secret using KEM decapsulation
-        // 3. Use the shared secret to encrypt the plaintext with an AEAD
-
-        // For now, use XOR as a placeholder for the KEM encapsulation
-        let mut encrypted = Vec::with_capacity(plaintext.len());
-        for (i, &byte) in plaintext.iter().enumerate() {
-            let key_byte = key.key_data.get(i % key.key_data.len()).unwrap_or(&0);
-            encrypted.push(byte ^ key_byte);
-        }
-
-        Ok(encrypted)
+        tracing::debug!(len = plaintext.len(), "ML-KEM-768 + AES-256-GCM encrypt");
+        pq::encrypt(plaintext, &key.key_data)
     }
 
     fn decrypt(&self, ciphertext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, String> {
         if key.algorithm != EncryptionAlgorithm::PostQuantumKem {
             return Err("Key algorithm mismatch".into());
         }
-
-        tracing::debug!(len = ciphertext.len(), "Post-quantum KEM decrypt");
-
-        // Reverse the placeholder encryption
-        let mut decrypted = Vec::with_capacity(ciphertext.len());
-        for (i, &byte) in ciphertext.iter().enumerate() {
-            let key_byte = key.key_data.get(i % key.key_data.len()).unwrap_or(&0);
-            decrypted.push(byte ^ key_byte);
-        }
-
-        Ok(decrypted)
+        tracing::debug!(len = ciphertext.len(), "ML-KEM-768 + AES-256-GCM decrypt");
+        pq::decrypt(ciphertext, &key.key_data)
     }
 
     fn algorithm(&self) -> EncryptionAlgorithm {
@@ -528,11 +652,13 @@ impl Cipher for PostQuantumKemCipher {
     }
 
     fn key_size(&self) -> usize {
-        32 // Kyber-512 public key size
+        // Packed keypair length (length prefix + ML-KEM-768 ek + dk). Not a
+        // raw symmetric key — see `pq::generate_keypair_bytes`.
+        4 + 1184 + 2400
     }
 
     fn nonce_size(&self) -> usize {
-        0 // KEM doesn't use nonce
+        0 // The per-message AES-GCM nonce is embedded in the ciphertext.
     }
 }
 
@@ -559,7 +685,7 @@ impl EncryptionManager {
             EncryptionAlgorithm::XChaCha20Poly1305,
             Arc::new(XChaCha20Poly1305Cipher) as Arc<dyn Cipher>,
         );
-        #[cfg(feature = "insecure-post-quantum")]
+        #[cfg(feature = "post-quantum")]
         ciphers.insert(
             EncryptionAlgorithm::PostQuantumKem,
             Arc::new(PostQuantumKemCipher) as Arc<dyn Cipher>,
@@ -688,17 +814,61 @@ mod tests {
         assert_ne!(encrypted, plaintext);
     }
 
-    #[cfg(feature = "insecure-post-quantum")]
+    #[cfg(feature = "post-quantum")]
     #[test]
     fn post_quantum_kem_encryption() {
         let manager = EncryptionManager::new();
         let key = EncryptionKey::generate(EncryptionAlgorithm::PostQuantumKem).unwrap();
-        let plaintext = b"Hello, world!";
+        let plaintext = b"Hello, post-quantum world!";
 
         let encrypted = manager.encrypt(plaintext, &key).unwrap();
         let decrypted = manager.decrypt(&encrypted, &key).unwrap();
 
         assert_eq!(decrypted, plaintext);
+        // The KEM ciphertext + AEAD framing must not leak the plaintext.
+        assert_ne!(encrypted, plaintext);
+        assert!(encrypted.len() > plaintext.len());
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn post_quantum_kem_is_randomized() {
+        // Encapsulation draws fresh randomness each call, so two encryptions of
+        // the same plaintext under the same keypair must differ — yet both must
+        // decrypt back to the original.
+        let manager = EncryptionManager::new();
+        let key = EncryptionKey::generate(EncryptionAlgorithm::PostQuantumKem).unwrap();
+        let plaintext = b"determinism is the enemy of nonce reuse";
+
+        let a = manager.encrypt(plaintext, &key).unwrap();
+        let b = manager.encrypt(plaintext, &key).unwrap();
+        assert_ne!(a, b, "PQ ciphertexts must be randomized");
+        assert_eq!(manager.decrypt(&a, &key).unwrap(), plaintext);
+        assert_eq!(manager.decrypt(&b, &key).unwrap(), plaintext);
+    }
+
+    #[cfg(feature = "post-quantum")]
+    #[test]
+    fn post_quantum_wrong_keypair_fails() {
+        // A ciphertext produced for one keypair must not decrypt under another.
+        let manager = EncryptionManager::new();
+        let key1 = EncryptionKey::generate(EncryptionAlgorithm::PostQuantumKem).unwrap();
+        let key2 = EncryptionKey::generate(EncryptionAlgorithm::PostQuantumKem).unwrap();
+        let encrypted = manager.encrypt(b"secret", &key1).unwrap();
+        // ML-KEM decapsulation never "fails" (it returns an implicit-reject
+        // secret), so the failure surfaces as an AES-GCM tag mismatch instead.
+        assert!(manager.decrypt(&encrypted, &key2).is_err());
+    }
+
+    #[cfg(not(feature = "post-quantum"))]
+    #[test]
+    fn post_quantum_requires_feature() {
+        // Without the feature the algorithm is unavailable end-to-end.
+        assert!(EncryptionKey::generate(EncryptionAlgorithm::PostQuantumKem).is_err());
+        let manager = EncryptionManager::new();
+        assert!(!manager
+            .registered_algorithms()
+            .contains(&EncryptionAlgorithm::PostQuantumKem));
     }
 
     #[test]

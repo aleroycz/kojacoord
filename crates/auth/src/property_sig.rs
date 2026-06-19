@@ -76,11 +76,47 @@ pub fn parse_mojang_public_key(key_str: &str) -> Result<RsaPublicKey, PropertySi
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '=')
         .collect();
-    let der = B64
+    let mut der = B64
         .decode(payload.as_bytes())
         .map_err(|e| PropertySigError::Base64("mojang_public_key", e.to_string()))?;
+    // The tolerant base64 path (stripped padding + `Indifferent` mode) can leave
+    // a single spurious trailing byte depending on how the key was wrapped in
+    // the TOML config, which makes `from_public_key_der` reject the whole thing
+    // with "trailing data at end of DER message". X.509 SubjectPublicKeyInfo is
+    // a self-describing DER SEQUENCE, so trim to the length the outer SEQUENCE
+    // declares before parsing — this drops any junk that follows the real key.
+    if let Some(len) = der_sequence_len(&der) {
+        if len <= der.len() {
+            der.truncate(len);
+        }
+    }
     RsaPublicKey::from_public_key_der(&der)
         .map_err(|e| PropertySigError::BadPublicKey(e.to_string()))
+}
+
+/// Total encoded length (tag + length octets + content) of the DER element at
+/// the start of `buf`, per X.690. Returns `None` if the header is missing,
+/// isn't a SEQUENCE (`0x30`), or uses an unreasonably long length encoding.
+fn der_sequence_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 2 || buf[0] != 0x30 {
+        return None;
+    }
+    let first = buf[1];
+    if first < 0x80 {
+        // Short form: the length is the byte itself.
+        Some(2 + first as usize)
+    } else {
+        // Long form: low 7 bits give the number of subsequent length octets.
+        let n = (first & 0x7f) as usize;
+        if n == 0 || n > 4 || buf.len() < 2 + n {
+            return None;
+        }
+        let mut len = 0usize;
+        for &b in &buf[2..2 + n] {
+            len = (len << 8) | b as usize;
+        }
+        Some(2 + n + len)
+    }
 }
 
 /// Verify a single `ProfileProperty` against Mojang's public key.
@@ -160,6 +196,21 @@ mod tests {
         let der = pub_key.to_public_key_der().unwrap();
         let key_str = B64.encode(der.as_bytes());
         let parsed = parse_mojang_public_key(&key_str).expect("test key must parse");
+        use rsa::traits::PublicKeyParts;
+        assert!(parsed.n().bits() >= 1000);
+    }
+
+    /// A key blob with junk appended after the real SPKI must still parse —
+    /// the DER SEQUENCE length is authoritative and trailing bytes are dropped.
+    /// This is the `trailing data at end of DER message` regression.
+    #[test]
+    fn parses_key_with_trailing_junk() {
+        let (_priv_key, pub_key) = test_keypair();
+        let mut der = pub_key.to_public_key_der().unwrap().as_bytes().to_vec();
+        der.push(0x00); // spurious trailing byte
+        let key_str = B64.encode(&der);
+        let parsed =
+            parse_mojang_public_key(&key_str).expect("key with trailing junk must still parse");
         use rsa::traits::PublicKeyParts;
         assert!(parsed.n().bits() >= 1000);
     }
